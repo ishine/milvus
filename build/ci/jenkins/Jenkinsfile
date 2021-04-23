@@ -1,0 +1,114 @@
+#!/usr/bin/env groovy
+@Library('mpl') _
+
+String cron_timezone = "TZ=Asia/Shanghai"
+String cron_string = BRANCH_NAME == "r0.3-test" ? "50 20,22,0,2,4,6,11,16 * * * " : ""
+
+pipeline {
+    agent none
+    triggers {
+        cron """${cron_timezone}
+            ${cron_string}"""
+    }
+    options {
+        timestamps()
+        // parallelsAlwaysFailFast()
+    }
+    environment {
+        PROJECT_NAME = "milvus"
+        SEMVER = "${BRANCH_NAME.contains('/') ? BRANCH_NAME.substring(BRANCH_NAME.lastIndexOf('/') + 1) : BRANCH_NAME}"
+        BUILD_TYPE = "Release"
+        LOWER_BUILD_TYPE = BUILD_TYPE.toLowerCase()
+        PACKAGE_VERSION = "${SEMVER}-${LOWER_BUILD_TYPE}"
+        PACKAGE_NAME = "${PROJECT_NAME}-${PACKAGE_VERSION}.tar.gz"
+        JFROG_CREDENTIALS_ID = "1a527823-d2b7-44fd-834b-9844350baf14"
+        JFROG_ARTFACTORY_URL = "http://192.168.1.201/artifactory/milvus"
+        PACKAGE_ARTFACTORY_URL = "${JFROG_ARTFACTORY_URL}/${PROJECT_NAME}/package/${PACKAGE_NAME}"
+        DOCKER_CREDENTIALS_ID = "ba070c98-c8cc-4f7c-b657-897715f359fc"
+        DOKCER_REGISTRY_URL = "registry.zilliz.com"
+        SOURCE_REPO = "${DOKCER_REGISTRY_URL}/milvus-distributed"
+        TARGET_REPO = "${DOKCER_REGISTRY_URL}/milvus-distributed"
+        SOURCE_TAG = "${CHANGE_TARGET ? CHANGE_TARGET : SEMVER}-${LOWER_BUILD_TYPE}"
+        TARGET_TAG = "${SEMVER}-${LOWER_BUILD_TYPE}"
+        DOCKER_BUILDKIT = 1
+    }
+    stages {
+        stage ('Build and UnitTest') {
+            agent {
+                kubernetes {
+                    label "${env.PROJECT_NAME}-${SEMVER}-${env.BUILD_NUMBER}-build"
+                    defaultContainer 'build-env'
+                    customWorkspace '/home/jenkins/agent/workspace'
+                    yamlFile "build/ci/jenkins/pod/build-env.yaml"
+                }
+            }
+            environment {
+                PULSAR_ADDRESS = "pulsar://127.0.0.1:6650"
+                ETCD_ADDRESS = "127.0.0.1:2379"
+                CCACHE_ARTFACTORY_URL = "${JFROG_ARTFACTORY_URL}/milvus-distributed/ccache"
+                THIRDPARTY_ARTFACTORY_URL = "${JFROG_ARTFACTORY_URL}/milvus-distributed/thirdparty"
+                CUSTOM_THIRDPARTY_PATH = "${WORKSPACE}/3rdparty_download"
+                GO_CACHE_ARTFACTORY_URL = "${JFROG_ARTFACTORY_URL}/milvus-distributed/go-cache"
+                GO_MOD_ARTFACTORY_URL = "${JFROG_ARTFACTORY_URL}/milvus-distributed/go-mod"
+            }
+            steps {
+                container('build-env') {
+                    MPLModule('Build')
+                    MPLModule('Package')
+                    // MPLModule('UnitTest')
+                }
+            }
+        }
+
+        stage ('Publish Docker Images') {
+            agent {
+                kubernetes {
+                    label "${env.PROJECT_NAME}-${SEMVER}-${env.BUILD_NUMBER}-publish"
+                    defaultContainer 'publish-images'
+                    yamlFile "build/ci/jenkins/pod/docker-pod.yaml"
+                }
+            }
+            steps {
+                container('publish-images') {
+                    MPLModule('Publish')
+                }
+            }
+        }
+
+        stage ('Dev Test') {
+            matrix {
+                axes {
+                    axis {
+                        name 'REGRESSION_SERVICE_TYPE'
+                        values 'standalone', 'distributed'
+                    }
+                }
+                environment {
+                    HELM_BRANCH = "2.0"
+                    HELM_RELEASE_NAMESPACE = "dev"
+                    HELM_RELEASE_NAME = "${PROJECT_NAME}-${SEMVER}-${env.BUILD_NUMBER}-${REGRESSION_SERVICE_TYPE}".replaceAll("\\.", "-").replaceAll("_", "-").toLowerCase()
+                    DEV_TEST_ARTIFACTS_PATH = "artifacts"
+                }
+                agent {
+                    kubernetes {
+                        label "${env.PROJECT_NAME}-${SEMVER}-${env.BUILD_NUMBER}-${REGRESSION_SERVICE_TYPE}-devtest"
+                        defaultContainer 'test-env'
+                        yamlFile "build/ci/jenkins/pod/test-env.yaml"
+                    }
+                }
+                stages {
+                    stage('Test') {
+                        steps {
+                            MPLModule('Python Regression')
+                        }
+                    }
+                }
+                post {
+                    cleanup {
+                        MPLModule('Cleanup Python Regression')
+                    }
+                }
+            }
+        }
+    }
+}

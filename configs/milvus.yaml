@@ -1,0 +1,80 @@
+# Copyright (C) 2019-2020 Zilliz. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software distributed under the License
+# is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+# or implied. See the License for the specific language governing permissions and limitations under the License.
+
+
+nodeID: # will be deprecated later
+  queryNodeIDList: [1]
+  dataNodeIDList: [3]
+
+etcd:
+  address: localhost
+  port: 2379
+  rootPath: by-dev
+  metaSubPath: meta # metaRootPath = rootPath + '/' + metaSubPath
+  kvSubPath: kv # kvRootPath = rootPath + '/' + kvSubPath
+  segFlushMetaSubPath: datanode/segment # Full Path = rootPath/metaSubPath/segFlushMetaSubPath
+  ddlFlushMetaSubPath: datanode/ddl     # Full Path = rootPath/metaSubPath/ddlFlushMetaSubPath
+
+minio:
+  address: localhost
+  port: 9000
+  accessKeyID: minioadmin
+  secretAccessKey: minioadmin
+  useSSL: false
+  bucketName: "a-bucket"
+
+pulsar:
+  address: localhost
+  port: 6650
+  maxMessageSize: 5242880 # 5 * 1024 * 1024 Bytes
+
+master:
+  address: localhost
+  port: 53100
+
+proxyNode:
+  port: 19530
+
+queryService:
+  address: localhost
+  port: 19531
+
+proxyService:
+  address: localhost
+  port: 21122
+
+queryNode:
+  gracefulTime: 5000 # ms, for search
+  port: 21123
+
+indexService:
+  address: localhost
+  port: 31000
+
+indexNode:
+  port: 21121
+
+dataService:
+  address: localhost
+  port: 13333
+
+dataNode:
+  port: 21124
+
+log:
+  level: debug # info, warn, error, panic, fatal, dpanic,
+  file:
+    rootPath: "" # default to stdout, stderr
+    maxSize: 300 # MB
+    maxAge: 10 # day
+    maxBackups: 20
+  dev: true # false, change behaviour of dpaniclevel
+  format: text # text/json

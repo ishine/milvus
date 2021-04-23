@@ -1,0 +1,366 @@
+syntax = "proto3";
+package milvus.proto.milvus;
+
+option go_package = "github.com/milvus-io/milvus/internal/proto/milvuspb";
+
+import "common.proto";
+import "schema.proto";
+
+service MilvusService {
+  rpc CreateCollection(CreateCollectionRequest) returns (common.Status) {}
+  rpc DropCollection(DropCollectionRequest) returns (common.Status) {}
+  rpc HasCollection(HasCollectionRequest) returns (BoolResponse) {}
+  rpc LoadCollection(LoadCollectionRequest) returns (common.Status) {}
+  rpc ReleaseCollection(ReleaseCollectionRequest) returns (common.Status) {}
+  rpc DescribeCollection(DescribeCollectionRequest) returns (DescribeCollectionResponse) {}
+  rpc GetCollectionStatistics(GetCollectionStatisticsRequest) returns (GetCollectionStatisticsResponse) {}
+  rpc ShowCollections(ShowCollectionsRequest) returns (ShowCollectionsResponse) {}
+
+  rpc CreatePartition(CreatePartitionRequest) returns (common.Status) {}
+  rpc DropPartition(DropPartitionRequest) returns (common.Status) {}
+  rpc HasPartition(HasPartitionRequest) returns (BoolResponse) {}
+  rpc LoadPartitions(LoadPartitionsRequest) returns (common.Status) {}
+  rpc ReleasePartitions(ReleasePartitionsRequest) returns (common.Status) {}
+  rpc GetPartitionStatistics(GetPartitionStatisticsRequest) returns (GetPartitionStatisticsResponse) {}
+  rpc ShowPartitions(ShowPartitionsRequest) returns (ShowPartitionsResponse) {}
+
+  rpc CreateIndex(CreateIndexRequest) returns (common.Status) {}
+  rpc DescribeIndex(DescribeIndexRequest) returns (DescribeIndexResponse) {}
+  rpc GetIndexState(GetIndexStateRequest) returns (GetIndexStateResponse) {}
+  rpc DropIndex(DropIndexRequest) returns (common.Status) {}
+
+  rpc Insert(InsertRequest) returns (InsertResponse) {}
+  rpc Search(SearchRequest) returns (SearchResults) {}
+  rpc Flush(FlushRequest) returns (common.Status) {}
+
+  rpc GetPersistentSegmentInfo(GetPersistentSegmentInfoRequest) returns (GetPersistentSegmentInfoResponse) {}
+  rpc GetQuerySegmentInfo(GetQuerySegmentInfoRequest) returns (GetQuerySegmentInfoResponse) {}
+
+  // TODO: remove
+  rpc RegisterLink(RegisterLinkRequest) returns (RegisterLinkResponse) {}
+}
+
+message CreateCollectionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  // `schema` is the serialized `schema.CollectionSchema`
+  bytes schema = 4;
+}
+
+message DropCollectionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+}
+
+message HasCollectionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+}
+
+message BoolResponse {
+  common.Status status = 1;
+  bool value = 2;
+}
+
+message StringResponse {
+  common.Status status = 1;
+  string value = 2;
+}
+
+message DescribeCollectionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  int64 collectionID = 4;
+}
+
+message DescribeCollectionResponse {
+  common.Status status = 1;
+  schema.CollectionSchema schema = 2;
+  int64 collectionID = 3;
+}
+
+message LoadCollectionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+}
+
+message ReleaseCollectionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+}
+
+message GetCollectionStatisticsRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+}
+
+message GetCollectionStatisticsResponse {
+  common.Status status = 1;
+  repeated common.KeyValuePair stats = 2;
+}
+
+message ShowCollectionsRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+}
+
+message ShowCollectionsResponse {
+  common.Status status = 1;
+  repeated string collection_names = 2;
+}
+
+message CreatePartitionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string partition_name = 4;
+}
+
+
+message DropPartitionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string partition_name = 4;
+}
+
+message HasPartitionRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string partition_name = 4;
+}
+
+message LoadPartitionsRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  repeated string partition_names = 4;
+}
+
+message ReleasePartitionsRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  repeated string partition_names = 4;
+}
+
+message GetPartitionStatisticsRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string partition_name = 4;
+}
+
+message GetPartitionStatisticsResponse {
+  common.Status status = 1;
+  repeated common.KeyValuePair stats = 2;
+}
+
+message ShowPartitionsRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  int64 collectionID = 4;
+}
+
+message ShowPartitionsResponse {
+  common.Status status = 1;
+  repeated string partition_names = 2;
+  repeated int64 partitionIDs = 3;
+}
+
+message DescribeSegmentRequest {
+  common.MsgBase base = 1;
+  int64 collectionID = 2;
+  int64 segmentID = 3;
+}
+
+message DescribeSegmentResponse {
+  common.Status status = 1;
+  int64 indexID = 2;
+  int64 buildID = 3;
+  bool enable_index = 4;
+}
+
+message ShowSegmentsRequest {
+  common.MsgBase base = 1;
+  int64 collectionID = 2;
+  int64 partitionID = 3;
+}
+
+message ShowSegmentsResponse {
+  common.Status status = 1;
+  repeated int64 segmentIDs = 2;
+}
+
+message CreateIndexRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string field_name = 4;
+  repeated common.KeyValuePair extra_params = 5;
+}
+
+message DescribeIndexRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string field_name = 4;
+  string index_name = 5;
+}
+
+message IndexDescription {
+  string index_name = 1;
+  int64 indexID = 2;
+  repeated common.KeyValuePair params = 3;
+}
+
+message DescribeIndexResponse {
+  common.Status status = 1;
+  repeated IndexDescription index_descriptions = 2;
+}
+
+message GetIndexStateRequest {
+  common.MsgBase base = 1;
+  string db_name = 2 ;
+  string collection_name = 3;
+  string field_name = 4;
+  string index_name = 5;
+}
+
+message GetIndexStateResponse {
+  common.Status status = 1;
+  common.IndexState state = 2;
+}
+
+message DropIndexRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string field_name = 4;
+  string index_name = 5;
+}
+
+message InsertRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  string partition_name = 4;
+  repeated common.Blob row_data = 5;
+  repeated uint32 hash_keys = 6;
+}
+
+message InsertResponse {
+  common.Status status = 1;
+  int64 rowID_begin = 2;
+  int64 rowID_end = 3;
+}
+
+enum PlaceholderType {
+  None = 0;
+  BinaryVector = 100;
+  FloatVector = 101;
+}
+
+message PlaceholderValue {
+  string tag = 1;
+  PlaceholderType type = 2;
+  // values is a 2d-array, every array contains a vector
+  repeated bytes values = 3;
+}
+
+message PlaceholderGroup {
+  repeated PlaceholderValue placeholders = 1;
+}
+
+message SearchRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  string collection_name = 3;
+  repeated string partition_names = 4;
+  string dsl = 5;
+  // serialized `PlaceholderGroup`
+  bytes placeholder_group = 6;
+}
+
+message Hits {
+  repeated int64 IDs = 1;
+  repeated bytes row_data = 2;
+  repeated float scores = 3;
+}
+
+message SearchResults {
+  common.Status status = 1;
+  repeated bytes hits = 2;
+}
+
+message FlushRequest {
+  common.MsgBase base = 1;
+  string db_name = 2;
+  repeated string collection_names = 3;
+}
+
+message PersistentSegmentInfo {
+  int64 segmentID = 1;
+  int64 collectionID = 2;
+  int64 partitionID = 3;
+  uint64 open_time = 4;
+  uint64 sealed_time = 5;
+  uint64 flushed_time = 6;
+  int64 num_rows = 7;
+  int64 mem_size = 8;
+  common.SegmentState state = 9;
+}
+
+message GetPersistentSegmentInfoRequest {
+  common.MsgBase base = 1;
+  string dbName = 2;
+  string collectionName = 3;
+}
+
+message GetPersistentSegmentInfoResponse {
+  common.Status status = 1;
+  repeated PersistentSegmentInfo infos = 2;
+}
+
+message QuerySegmentInfo {
+  int64 segmentID = 1;
+  int64 collectionID = 2;
+  int64 partitionID = 3;
+  int64 mem_size = 4;
+  int64 num_rows = 5;
+  string index_name = 6;
+  int64 indexID = 7;
+}
+
+message GetQuerySegmentInfoRequest {
+  common.MsgBase base = 1;
+  string dbName = 2;
+  string collectionName = 3;
+}
+
+message GetQuerySegmentInfoResponse {
+  common.Status status = 1;
+  repeated QuerySegmentInfo infos = 2;
+}
+
+
+message RegisterLinkRequest {
+}
+
+message RegisterLinkResponse {
+  common.Address address = 1;
+  common.Status status = 2;
+}
+
+service ProxyService {
+  rpc RegisterLink(RegisterLinkRequest) returns (RegisterLinkResponse) {}
+}

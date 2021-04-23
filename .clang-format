@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 ---
+# Below is copied from milvus project
 BasedOnStyle:  Google
 DerivePointerAlignment: false
 ColumnLimit: 120
@@ -25,3 +26,9 @@ AllowShortBlocksOnASingleLine: false
 AllowShortFunctionsOnASingleLine: false
 AllowShortIfStatementsOnASingleLine: false
 AlignTrailingComments: true
+
+# Appended Options
+SortIncludes: false 
+Standard: Latest
+AlignAfterOpenBracket: Align
+BinPackParameters: false

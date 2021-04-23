@@ -1,13 +1,13 @@
 ---
 name: "\U0001F4DD Documentation request"
 about: Report incorrect or needed documentation
-title: "[DOC]"
+title: ''
 labels: ''
 assignees: ''
 
 ---
 
-## Report incorrect documentation
+**Please state your issue using the following template and, most importantly, in English.**
 
 **Location of incorrect documentation**
 Provide links and line numbers if applicable.

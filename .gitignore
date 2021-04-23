@@ -1,24 +1,52 @@
 # CLion generated files
-core/cmake-build-debug/
-core/cmake-build-release/
-core/cmake_build
-core/.idea/
-core/thirdparty/knowhere_build
-
-.idea/
-.ycm_extra_conf.py
-__pycache__
+**/cmake-build-debug/*
+**/cmake_build/*
+**/cmake-build-release/*
+internal/core/output/*
+internal/core/build/*
+internal/kv/rocksdb/cwrapper/output/*
+**/.idea/*
+internal/msgstream/pulsarms/client-cpp/build/
+internal/msgstream/pulsarms/client-cpp/build/*
 
 # vscode generated files
 .vscode
+docker-compose-devcontainer.yml
+docker-compose-devcontainer.yml.tmp
 
-.env
-build
 cmake-build-debug
 cmake-build-release
 cmake_build
 
+*.code-workspace
+
+# Docker generated cache file
+.docker/
+
+# proxynode
+proxy/milvus
+proxy/cmake_build
+proxy/cmake-build-debug
+proxy/cmake-build-release
+proxy/cmake_build_release
+proxy/thirdparty/grpc-src
+proxy/thirdparty/grpc-build
+proxy/milvus/*
+proxy/suvlim/
+proxy/suvlim/*
+
+proxy-go/proxy-go
+
+# sdk
+sdk/cmake_build
+sdk/cmake-build-debug
+sdk/cmake-build-release
+sdk/cmake_build_release
+
 # Compiled source
+bin/
+lib/
+cmake_build/
 *.a
 *.so
 *.so.*
@@ -26,3 +54,21 @@ cmake_build
 *.lo
 *.tar.gz
 *.log
+.coverage
+*.pyc
+*.log
+
+.DS_Store
+*.swp
+cwrapper_build
+**/cwrapper_rocksdb_build/
+**/.clangd/*
+**/compile_commands.json
+**/.lint
+typescript
+**/.pytest_cache/
+.root
+gtags.conf
+
+# Delve generated file
+**/__debug_bin
