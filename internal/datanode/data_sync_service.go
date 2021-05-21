@@ -58,7 +58,11 @@ func (dsService *dataSyncService) init() {
 
 func (dsService *dataSyncService) start() {
 	log.Debug("Data Sync Service Start Successfully")
-	dsService.fg.Start()
+	if dsService.fg != nil {
+		dsService.fg.Start()
+	} else {
+		log.Debug("Data Sync Service flowgraph nil")
+	}
 }
 
 func (dsService *dataSyncService) close() {
@@ -102,8 +106,8 @@ func (dsService *dataSyncService) initNodes() {
 	var ddStreamNode Node = newDDInputNode(dsService.ctx, dsService.msFactory)
 
 	var filterDmNode Node = newFilteredDmNode()
-	var ddNode Node = newDDNode(dsService.ctx, mt, dsService.flushChan, dsService.replica)
-	var insertBufferNode Node = newInsertBufferNode(dsService.ctx, mt, dsService.replica, dsService.msFactory)
+	var ddNode Node = newDDNode(dsService.ctx, mt, dsService.flushChan, dsService.replica, dsService.idAllocator)
+	var insertBufferNode Node = newInsertBufferNode(dsService.ctx, mt, dsService.replica, dsService.msFactory, dsService.idAllocator)
 	var gcNode Node = newGCNode(dsService.replica)
 
 	dsService.fg.AddNode(dmStreamNode)

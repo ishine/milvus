@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/proto/planpb"
+
 	"github.com/milvus-io/milvus/internal/util/funcutil"
 
 	"go.uber.org/zap"
@@ -45,9 +47,15 @@ const (
 	CreateCollectionTaskName        = "CreateCollectionTask"
 	DropCollectionTaskName          = "DropCollectionTask"
 	SearchTaskName                  = "SearchTask"
+	RetrieveTaskName                = "RetrieveTask"
+	AnnsFieldKey                    = "anns_field"
+	TopKKey                         = "topk"
+	MetricTypeKey                   = "metric_type"
+	SearchParamsKey                 = "params"
 	HasCollectionTaskName           = "HasCollectionTask"
 	DescribeCollectionTaskName      = "DescribeCollectionTask"
 	GetCollectionStatisticsTaskName = "GetCollectionStatisticsTask"
+	GetPartitionStatisticsTaskName  = "GetPartitionStatisticsTask"
 	ShowCollectionTaskName          = "ShowCollectionTask"
 	CreatePartitionTaskName         = "CreatePartitionTask"
 	DropPartitionTaskName           = "DropPartitionTask"
@@ -57,6 +65,7 @@ const (
 	DescribeIndexTaskName           = "DescribeIndexTask"
 	DropIndexTaskName               = "DropIndexTask"
 	GetIndexStateTaskName           = "GetIndexStateTask"
+	GetIndexBuildProgressTaskName   = "GetIndexBuildProgressTask"
 	FlushTaskName                   = "FlushTask"
 	LoadCollectionTaskName          = "LoadCollectionTask"
 	ReleaseCollectionTaskName       = "ReleaseCollectionTask"
@@ -555,22 +564,63 @@ func (st *SearchTask) PreExecute(ctx context.Context) error {
 		}
 	}
 	st.Base.MsgType = commonpb.MsgType_Search
-	queryBytes, err := proto.Marshal(st.query)
-	if err != nil {
-		return err
-	}
-	st.Query = &commonpb.Blob{
-		Value: queryBytes,
+
+	if st.query.GetDslType() == commonpb.DslType_BoolExprV1 {
+		schema, err := globalMetaCache.GetCollectionSchema(ctx, collectionName)
+		if err != nil { // err is not nil if collection not exists
+			return err
+		}
+
+		annsField, err := GetAttrByKeyFromRepeatedKV(AnnsFieldKey, st.query.SearchParams)
+		if err != nil {
+			return errors.New(AnnsFieldKey + " not found in search_params")
+		}
+
+		topKStr, err := GetAttrByKeyFromRepeatedKV(TopKKey, st.query.SearchParams)
+		if err != nil {
+			return errors.New(TopKKey + " not found in search_params")
+		}
+		topK, err := strconv.Atoi(topKStr)
+		if err != nil {
+			return errors.New(TopKKey + " " + topKStr + " is not invalid")
+		}
+
+		metricType, err := GetAttrByKeyFromRepeatedKV(MetricTypeKey, st.query.SearchParams)
+		if err != nil {
+			return errors.New(MetricTypeKey + " not found in search_params")
+		}
+
+		searchParams, err := GetAttrByKeyFromRepeatedKV(SearchParamsKey, st.query.SearchParams)
+		if err != nil {
+			return errors.New(SearchParamsKey + " not found in search_params")
+		}
+
+		queryInfo := &planpb.QueryInfo{
+			Topk:         int64(topK),
+			MetricType:   metricType,
+			SearchParams: searchParams,
+		}
+
+		plan, err := CreateQueryPlan(schema, &st.query.Dsl, annsField, queryInfo)
+		if err != nil {
+			return errors.New("invalid expression: " + st.query.Dsl)
+		}
+
+		st.SearchRequest.DslType = commonpb.DslType_BoolExprV1
+		st.SearchRequest.SerializedExprPlan, err = proto.Marshal(plan)
+		if err != nil {
+			return err
+		}
 	}
 
-	st.ResultChannelID = Params.SearchResultChannelNames[0]
-	st.DbID = 0 // todo
+	st.SearchRequest.ResultChannelID = Params.SearchResultChannelNames[0]
+	st.SearchRequest.DbID = 0 // todo
 	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
 	if err != nil { // err is not nil if collection not exists
 		return err
 	}
-	st.CollectionID = collectionID
-	st.PartitionIDs = make([]UniqueID, 0)
+	st.SearchRequest.CollectionID = collectionID
+	st.SearchRequest.PartitionIDs = make([]UniqueID, 0)
 
 	partitionsMap, err := globalMetaCache.GetPartitions(ctx, collectionName)
 	if err != nil {
@@ -600,8 +650,8 @@ func (st *SearchTask) PreExecute(ctx context.Context) error {
 		}
 	}
 
-	st.Dsl = st.query.Dsl
-	st.PlaceholderGroup = st.query.PlaceholderGroup
+	st.SearchRequest.Dsl = st.query.Dsl
+	st.SearchRequest.PlaceholderGroup = st.query.PlaceholderGroup
 
 	return nil
 }
@@ -886,6 +936,138 @@ func (st *SearchTask) PostExecute(ctx context.Context) error {
 	}
 }
 
+type RetrieveTask struct {
+	Condition
+	*internalpb.RetrieveRequest
+	ctx            context.Context
+	queryMsgStream msgstream.MsgStream
+	resultBuf      chan []*internalpb.RetrieveResults
+	result         *milvuspb.RetrieveResults
+	retrieve       *milvuspb.RetrieveRequest
+}
+
+func (rt *RetrieveTask) TraceCtx() context.Context {
+	return rt.ctx
+}
+
+func (rt *RetrieveTask) ID() UniqueID {
+	return rt.Base.MsgID
+}
+
+func (rt *RetrieveTask) SetID(uid UniqueID) {
+	rt.Base.MsgID = uid
+}
+
+func (rt *RetrieveTask) Name() string {
+	return RetrieveTaskName
+}
+
+func (rt *RetrieveTask) Type() commonpb.MsgType {
+	return rt.Base.MsgType
+}
+
+func (rt *RetrieveTask) BeginTs() Timestamp {
+	return rt.Base.Timestamp
+}
+
+func (rt *RetrieveTask) EndTs() Timestamp {
+	return rt.Base.Timestamp
+}
+
+func (rt *RetrieveTask) SetTs(ts Timestamp) {
+	rt.Base.Timestamp = ts
+}
+
+func (rt *RetrieveTask) OnEnqueue() error {
+	rt.Base.MsgType = commonpb.MsgType_Retrieve
+	return nil
+}
+
+func (rt *RetrieveTask) PreExecute(ctx context.Context) error {
+	rt.Base.MsgType = commonpb.MsgType_Retrieve
+	rt.Base.SourceID = Params.ProxyID
+
+	collectionName := rt.retrieve.CollectionName
+	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	if err != nil {
+		return err
+	}
+
+	if err := ValidateCollectionName(rt.retrieve.CollectionName); err != nil {
+		return err
+	}
+
+	for _, tag := range rt.retrieve.PartitionNames {
+		if err := ValidatePartitionTag(tag, false); err != nil {
+			return err
+		}
+	}
+
+	rt.Base.MsgType = commonpb.MsgType_Retrieve
+	rt.Ids = rt.retrieve.Ids
+	rt.OutputFields = rt.retrieve.OutputFields
+
+	rt.ResultChannelID = Params.RetrieveChannelNames[0]
+	rt.DbID = 0 // todo(yukun)
+
+	rt.CollectionID = collectionID
+	rt.PartitionIDs = make([]UniqueID, 0)
+
+	partitionsMap, err := globalMetaCache.GetPartitions(ctx, collectionName)
+	if err != nil {
+		return err
+	}
+
+	partitionsRecord := make(map[UniqueID]bool)
+	for _, partitionName := range rt.retrieve.PartitionNames {
+		pattern := fmt.Sprintf("^%s$", partitionName)
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return errors.New("invalid partition names")
+		}
+		found := false
+		for name, pID := range partitionsMap {
+			if re.MatchString(name) {
+				if _, exist := partitionsRecord[pID]; !exist {
+					rt.PartitionIDs = append(rt.PartitionIDs, pID)
+					partitionsRecord[pID] = true
+				}
+				found = true
+			}
+		}
+		if !found {
+			errMsg := fmt.Sprintf("PartitonName: %s not found", partitionName)
+			return errors.New(errMsg)
+		}
+	}
+
+	return nil
+}
+
+func (rt *RetrieveTask) Execute(ctx context.Context) error {
+	var tsMsg msgstream.TsMsg = &msgstream.RetrieveMsg{
+		RetrieveRequest: *rt.RetrieveRequest,
+		BaseMsg: msgstream.BaseMsg{
+			Ctx:            ctx,
+			HashValues:     []uint32{uint32(Params.ProxyID)},
+			BeginTimestamp: rt.Base.Timestamp,
+			EndTimestamp:   rt.Base.Timestamp,
+		},
+	}
+	msgPack := msgstream.MsgPack{
+		BeginTs: rt.Base.Timestamp,
+		EndTs:   rt.Base.Timestamp,
+		Msgs:    make([]msgstream.TsMsg, 1),
+	}
+	msgPack.Msgs[0] = tsMsg
+	err := rt.queryMsgStream.Produce(&msgPack)
+	log.Debug("proxynode", zap.Int("length of retrieveMsg", len(msgPack.Msgs)))
+	if err != nil {
+		log.Debug("proxynode", zap.String("send retrieve request failed", err.Error()))
+	}
+	return err
+}
+
 type HasCollectionTask struct {
 	Condition
 	*milvuspb.HasCollectionRequest
@@ -1028,7 +1210,7 @@ func (dct *DescribeCollectionTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 
-type GetCollectionsStatisticsTask struct {
+type GetCollectionStatisticsTask struct {
 	Condition
 	*milvuspb.GetCollectionStatisticsRequest
 	ctx         context.Context
@@ -1036,50 +1218,50 @@ type GetCollectionsStatisticsTask struct {
 	result      *milvuspb.GetCollectionStatisticsResponse
 }
 
-func (g *GetCollectionsStatisticsTask) TraceCtx() context.Context {
+func (g *GetCollectionStatisticsTask) TraceCtx() context.Context {
 	return g.ctx
 }
 
-func (g *GetCollectionsStatisticsTask) ID() UniqueID {
+func (g *GetCollectionStatisticsTask) ID() UniqueID {
 	return g.Base.MsgID
 }
 
-func (g *GetCollectionsStatisticsTask) SetID(uid UniqueID) {
+func (g *GetCollectionStatisticsTask) SetID(uid UniqueID) {
 	g.Base.MsgID = uid
 }
 
-func (g *GetCollectionsStatisticsTask) Name() string {
+func (g *GetCollectionStatisticsTask) Name() string {
 	return GetCollectionStatisticsTaskName
 }
 
-func (g *GetCollectionsStatisticsTask) Type() commonpb.MsgType {
+func (g *GetCollectionStatisticsTask) Type() commonpb.MsgType {
 	return g.Base.MsgType
 }
 
-func (g *GetCollectionsStatisticsTask) BeginTs() Timestamp {
+func (g *GetCollectionStatisticsTask) BeginTs() Timestamp {
 	return g.Base.Timestamp
 }
 
-func (g *GetCollectionsStatisticsTask) EndTs() Timestamp {
+func (g *GetCollectionStatisticsTask) EndTs() Timestamp {
 	return g.Base.Timestamp
 }
 
-func (g *GetCollectionsStatisticsTask) SetTs(ts Timestamp) {
+func (g *GetCollectionStatisticsTask) SetTs(ts Timestamp) {
 	g.Base.Timestamp = ts
 }
 
-func (g *GetCollectionsStatisticsTask) OnEnqueue() error {
+func (g *GetCollectionStatisticsTask) OnEnqueue() error {
 	g.Base = &commonpb.MsgBase{}
 	return nil
 }
 
-func (g *GetCollectionsStatisticsTask) PreExecute(ctx context.Context) error {
+func (g *GetCollectionStatisticsTask) PreExecute(ctx context.Context) error {
 	g.Base.MsgType = commonpb.MsgType_GetCollectionStatistics
 	g.Base.SourceID = Params.ProxyID
 	return nil
 }
 
-func (g *GetCollectionsStatisticsTask) Execute(ctx context.Context) error {
+func (g *GetCollectionStatisticsTask) Execute(ctx context.Context) error {
 	collID, err := globalMetaCache.GetCollectionID(ctx, g.CollectionName)
 	if err != nil {
 		return err
@@ -1111,7 +1293,99 @@ func (g *GetCollectionsStatisticsTask) Execute(ctx context.Context) error {
 	return nil
 }
 
-func (g *GetCollectionsStatisticsTask) PostExecute(ctx context.Context) error {
+func (g *GetCollectionStatisticsTask) PostExecute(ctx context.Context) error {
+	return nil
+}
+
+type GetPartitionStatisticsTask struct {
+	Condition
+	*milvuspb.GetPartitionStatisticsRequest
+	ctx         context.Context
+	dataService types.DataService
+	result      *milvuspb.GetPartitionStatisticsResponse
+}
+
+func (g *GetPartitionStatisticsTask) TraceCtx() context.Context {
+	return g.ctx
+}
+
+func (g *GetPartitionStatisticsTask) ID() UniqueID {
+	return g.Base.MsgID
+}
+
+func (g *GetPartitionStatisticsTask) SetID(uid UniqueID) {
+	g.Base.MsgID = uid
+}
+
+func (g *GetPartitionStatisticsTask) Name() string {
+	return GetPartitionStatisticsTaskName
+}
+
+func (g *GetPartitionStatisticsTask) Type() commonpb.MsgType {
+	return g.Base.MsgType
+}
+
+func (g *GetPartitionStatisticsTask) BeginTs() Timestamp {
+	return g.Base.Timestamp
+}
+
+func (g *GetPartitionStatisticsTask) EndTs() Timestamp {
+	return g.Base.Timestamp
+}
+
+func (g *GetPartitionStatisticsTask) SetTs(ts Timestamp) {
+	g.Base.Timestamp = ts
+}
+
+func (g *GetPartitionStatisticsTask) OnEnqueue() error {
+	g.Base = &commonpb.MsgBase{}
+	return nil
+}
+
+func (g *GetPartitionStatisticsTask) PreExecute(ctx context.Context) error {
+	g.Base.MsgType = commonpb.MsgType_GetPartitionStatistics
+	g.Base.SourceID = Params.ProxyID
+	return nil
+}
+
+func (g *GetPartitionStatisticsTask) Execute(ctx context.Context) error {
+	collID, err := globalMetaCache.GetCollectionID(ctx, g.CollectionName)
+	if err != nil {
+		return err
+	}
+	partitionID, err := globalMetaCache.GetPartitionID(ctx, g.CollectionName, g.PartitionName)
+	if err != nil {
+		return err
+	}
+	req := &datapb.GetPartitionStatisticsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_GetPartitionStatistics,
+			MsgID:     g.Base.MsgID,
+			Timestamp: g.Base.Timestamp,
+			SourceID:  g.Base.SourceID,
+		},
+		CollectionID: collID,
+		PartitionID:  partitionID,
+	}
+
+	result, _ := g.dataService.GetPartitionStatistics(ctx, req)
+	if result == nil {
+		return errors.New("get partition statistics resp is nil")
+	}
+	if result.Status.ErrorCode != commonpb.ErrorCode_Success {
+		return errors.New(result.Status.Reason)
+	}
+	g.result = &milvuspb.GetPartitionStatisticsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		Stats: result.Stats,
+	}
+	return nil
+}
+
+func (g *GetPartitionStatisticsTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 
@@ -1611,13 +1885,7 @@ func (dit *DescribeIndexTask) PreExecute(ctx context.Context) error {
 	dit.Base.MsgType = commonpb.MsgType_DescribeIndex
 	dit.Base.SourceID = Params.ProxyID
 
-	collName, fieldName := dit.CollectionName, dit.FieldName
-
-	if err := ValidateCollectionName(collName); err != nil {
-		return err
-	}
-
-	if err := ValidateFieldName(fieldName); err != nil {
+	if err := ValidateCollectionName(dit.CollectionName); err != nil {
 		return err
 	}
 
@@ -1723,6 +1991,228 @@ func (dit *DropIndexTask) PostExecute(ctx context.Context) error {
 	return nil
 }
 
+type GetIndexBuildProgressTask struct {
+	Condition
+	*milvuspb.GetIndexBuildProgressRequest
+	ctx           context.Context
+	indexService  types.IndexService
+	masterService types.MasterService
+	dataService   types.DataService
+	result        *milvuspb.GetIndexBuildProgressResponse
+}
+
+func (gibpt *GetIndexBuildProgressTask) TraceCtx() context.Context {
+	return gibpt.ctx
+}
+
+func (gibpt *GetIndexBuildProgressTask) ID() UniqueID {
+	return gibpt.Base.MsgID
+}
+
+func (gibpt *GetIndexBuildProgressTask) SetID(uid UniqueID) {
+	gibpt.Base.MsgID = uid
+}
+
+func (gibpt *GetIndexBuildProgressTask) Name() string {
+	return GetIndexBuildProgressTaskName
+}
+
+func (gibpt *GetIndexBuildProgressTask) Type() commonpb.MsgType {
+	return gibpt.Base.MsgType
+}
+
+func (gibpt *GetIndexBuildProgressTask) BeginTs() Timestamp {
+	return gibpt.Base.Timestamp
+}
+
+func (gibpt *GetIndexBuildProgressTask) EndTs() Timestamp {
+	return gibpt.Base.Timestamp
+}
+
+func (gibpt *GetIndexBuildProgressTask) SetTs(ts Timestamp) {
+	gibpt.Base.Timestamp = ts
+}
+
+func (gibpt *GetIndexBuildProgressTask) OnEnqueue() error {
+	gibpt.Base = &commonpb.MsgBase{}
+	return nil
+}
+
+func (gibpt *GetIndexBuildProgressTask) PreExecute(ctx context.Context) error {
+	gibpt.Base.MsgType = commonpb.MsgType_GetIndexBuildProgress
+	gibpt.Base.SourceID = Params.ProxyID
+
+	if err := ValidateCollectionName(gibpt.CollectionName); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (gibpt *GetIndexBuildProgressTask) Execute(ctx context.Context) error {
+	collectionName := gibpt.CollectionName
+	collectionID, err := globalMetaCache.GetCollectionID(ctx, collectionName)
+	if err != nil { // err is not nil if collection not exists
+		return err
+	}
+
+	showPartitionRequest := &milvuspb.ShowPartitionsRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_ShowPartitions,
+			MsgID:     gibpt.Base.MsgID,
+			Timestamp: gibpt.Base.Timestamp,
+			SourceID:  Params.ProxyID,
+		},
+		DbName:         gibpt.DbName,
+		CollectionName: collectionName,
+		CollectionID:   collectionID,
+	}
+	partitions, err := gibpt.masterService.ShowPartitions(ctx, showPartitionRequest)
+	if err != nil {
+		return err
+	}
+
+	if gibpt.IndexName == "" {
+		gibpt.IndexName = Params.DefaultIndexName
+	}
+
+	describeIndexReq := milvuspb.DescribeIndexRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_DescribeIndex,
+			MsgID:     gibpt.Base.MsgID,
+			Timestamp: gibpt.Base.Timestamp,
+			SourceID:  Params.ProxyID,
+		},
+		DbName:         gibpt.DbName,
+		CollectionName: gibpt.CollectionName,
+		//		IndexName:      gibpt.IndexName,
+	}
+
+	indexDescriptionResp, err2 := gibpt.masterService.DescribeIndex(ctx, &describeIndexReq)
+	if err2 != nil {
+		return err2
+	}
+
+	matchIndexID := int64(-1)
+	foundIndexID := false
+	for _, desc := range indexDescriptionResp.IndexDescriptions {
+		if desc.IndexName == gibpt.IndexName {
+			matchIndexID = desc.IndexID
+			foundIndexID = true
+			break
+		}
+	}
+	if !foundIndexID {
+		return errors.New(fmt.Sprint("Can't found IndexID for indexName", gibpt.IndexName))
+	}
+
+	var allSegmentIDs []UniqueID
+	for _, partitionID := range partitions.PartitionIDs {
+		showSegmentsRequest := &milvuspb.ShowSegmentsRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_ShowSegments,
+				MsgID:     gibpt.Base.MsgID,
+				Timestamp: gibpt.Base.Timestamp,
+				SourceID:  Params.ProxyID,
+			},
+			CollectionID: collectionID,
+			PartitionID:  partitionID,
+		}
+		segments, err := gibpt.masterService.ShowSegments(ctx, showSegmentsRequest)
+		if err != nil {
+			return err
+		}
+		if segments.Status.ErrorCode != commonpb.ErrorCode_Success {
+			return errors.New(segments.Status.Reason)
+		}
+		allSegmentIDs = append(allSegmentIDs, segments.SegmentIDs...)
+	}
+
+	getIndexStatesRequest := &indexpb.GetIndexStatesRequest{
+		IndexBuildIDs: make([]UniqueID, 0),
+	}
+
+	buildIndexMap := make(map[int64]int64)
+	for _, segmentID := range allSegmentIDs {
+		describeSegmentRequest := &milvuspb.DescribeSegmentRequest{
+			Base: &commonpb.MsgBase{
+				MsgType:   commonpb.MsgType_DescribeSegment,
+				MsgID:     gibpt.Base.MsgID,
+				Timestamp: gibpt.Base.Timestamp,
+				SourceID:  Params.ProxyID,
+			},
+			CollectionID: collectionID,
+			SegmentID:    segmentID,
+		}
+		segmentDesc, err := gibpt.masterService.DescribeSegment(ctx, describeSegmentRequest)
+		if err != nil {
+			return err
+		}
+		if segmentDesc.IndexID == matchIndexID {
+			if segmentDesc.EnableIndex {
+				getIndexStatesRequest.IndexBuildIDs = append(getIndexStatesRequest.IndexBuildIDs, segmentDesc.BuildID)
+				buildIndexMap[segmentID] = segmentDesc.BuildID
+			}
+		}
+	}
+
+	states, err := gibpt.indexService.GetIndexStates(ctx, getIndexStatesRequest)
+	if err != nil {
+		return err
+	}
+
+	if states.Status.ErrorCode != commonpb.ErrorCode_Success {
+		gibpt.result = &milvuspb.GetIndexBuildProgressResponse{
+			Status: states.Status,
+		}
+	}
+
+	buildFinishMap := make(map[int64]bool)
+	for _, state := range states.States {
+		if state.State == commonpb.IndexState_Finished {
+			buildFinishMap[state.IndexBuildID] = true
+		}
+	}
+
+	infoResp, err := gibpt.dataService.GetSegmentInfo(ctx, &datapb.GetSegmentInfoRequest{
+		Base: &commonpb.MsgBase{
+			MsgType:   commonpb.MsgType_SegmentInfo,
+			MsgID:     0,
+			Timestamp: 0,
+			SourceID:  Params.ProxyID,
+		},
+		SegmentIDs: allSegmentIDs,
+	})
+	if err != nil {
+		return err
+	}
+
+	total := int64(0)
+	indexed := int64(0)
+
+	for _, info := range infoResp.Infos {
+		total += info.NumRows
+		if buildFinishMap[buildIndexMap[info.ID]] {
+			indexed += info.NumRows
+		}
+	}
+
+	gibpt.result = &milvuspb.GetIndexBuildProgressResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		TotalRows:   total,
+		IndexedRows: indexed,
+	}
+
+	return nil
+}
+
+func (gibpt *GetIndexBuildProgressTask) PostExecute(ctx context.Context) error {
+	return nil
+}
+
 type GetIndexStateTask struct {
 	Condition
 	*milvuspb.GetIndexStateRequest
@@ -1773,13 +2263,7 @@ func (gist *GetIndexStateTask) PreExecute(ctx context.Context) error {
 	gist.Base.MsgType = commonpb.MsgType_GetIndexState
 	gist.Base.SourceID = Params.ProxyID
 
-	collName, fieldName := gist.CollectionName, gist.FieldName
-
-	if err := ValidateCollectionName(collName); err != nil {
-		return err
-	}
-
-	if err := ValidateFieldName(fieldName); err != nil {
+	if err := ValidateCollectionName(gist.CollectionName); err != nil {
 		return err
 	}
 
@@ -1822,7 +2306,6 @@ func (gist *GetIndexStateTask) Execute(ctx context.Context) error {
 		},
 		DbName:         gist.DbName,
 		CollectionName: gist.CollectionName,
-		FieldName:      gist.FieldName,
 		IndexName:      gist.IndexName,
 	}
 

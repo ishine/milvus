@@ -40,11 +40,6 @@ func TestParamTable_DataNode(t *testing.T) {
 		log.Println("FlushInsertBufferSize:", size)
 	})
 
-	t.Run("Test FlushDdBufSize", func(t *testing.T) {
-		size := Params.FlushDdBufferSize
-		log.Println("FlushDdBufferSize:", size)
-	})
-
 	t.Run("Test InsertBinlogRootPath", func(t *testing.T) {
 		path := Params.InsertBinlogRootPath
 		log.Println("InsertBinlogRootPath:", path)
@@ -123,10 +118,5 @@ func TestParamTable_DataNode(t *testing.T) {
 	t.Run("Test MinioBucketName", func(t *testing.T) {
 		name := Params.MinioBucketName
 		log.Println("MinioBucketName:", name)
-	})
-
-	t.Run("Test sliceIndex", func(t *testing.T) {
-		idx := Params.sliceIndex()
-		log.Println("sliceIndex:", idx)
 	})
 }

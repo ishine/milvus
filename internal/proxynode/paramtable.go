@@ -42,24 +42,28 @@ type ParamTable struct {
 	IP             string
 	NetworkAddress string
 
+	EtcdAddress   string
+	MetaRootPath  string
 	MasterAddress string
 	PulsarAddress string
 
-	QueryNodeNum              int
-	QueryNodeIDList           []UniqueID
-	ProxyID                   UniqueID
-	TimeTickInterval          time.Duration
-	K2SChannelNames           []string
-	SearchChannelNames        []string
-	SearchResultChannelNames  []string
-	ProxySubName              string
-	ProxyTimeTickChannelNames []string
-	MsgStreamTimeTickBufSize  int64
-	MaxNameLength             int64
-	MaxFieldNum               int64
-	MaxDimension              int64
-	DefaultPartitionName      string
-	DefaultIndexName          string
+	QueryNodeNum               int
+	QueryNodeIDList            []UniqueID
+	ProxyID                    UniqueID
+	TimeTickInterval           time.Duration
+	K2SChannelNames            []string
+	SearchChannelNames         []string
+	SearchResultChannelNames   []string
+	RetrieveChannelNames       []string
+	RetrieveResultChannelNames []string
+	ProxySubName               string
+	ProxyTimeTickChannelNames  []string
+	MsgStreamTimeTickBufSize   int64
+	MaxNameLength              int64
+	MaxFieldNum                int64
+	MaxDimension               int64
+	DefaultPartitionName       string
+	DefaultIndexName           string
 
 	PulsarMaxMessageSize int
 	Log                  log.Config
@@ -128,6 +132,9 @@ func (pt *ParamTable) Init() {
 	once.Do(func() {
 		pt.BaseTable.Init()
 		pt.initLogCfg()
+
+		pt.initEtcdAddress()
+		pt.initMetaRootPath()
 		// err := pt.LoadYaml("advanced/proxy_node.yaml")
 		// if err != nil {
 		// 	panic(err)
@@ -361,4 +368,24 @@ func (pt *ParamTable) initLogCfg() {
 
 func (pt *ParamTable) initRoleName() {
 	pt.RoleName = fmt.Sprintf("%s-%d", "ProxyNode", pt.ProxyID)
+}
+
+func (pt *ParamTable) initEtcdAddress() {
+	addr, err := pt.Load("_EtcdAddress")
+	if err != nil {
+		panic(err)
+	}
+	pt.EtcdAddress = addr
+}
+
+func (pt *ParamTable) initMetaRootPath() {
+	rootPath, err := pt.Load("etcd.rootPath")
+	if err != nil {
+		panic(err)
+	}
+	subPath, err := pt.Load("etcd.metaSubPath")
+	if err != nil {
+		panic(err)
+	}
+	pt.MetaRootPath = path.Join(rootPath, subPath)
 }

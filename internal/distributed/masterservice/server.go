@@ -29,6 +29,7 @@ import (
 	isc "github.com/milvus-io/milvus/internal/distributed/indexservice/client"
 	psc "github.com/milvus-io/milvus/internal/distributed/proxyservice/client"
 	qsc "github.com/milvus-io/milvus/internal/distributed/queryservice/client"
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	cms "github.com/milvus-io/milvus/internal/masterservice"
 	"github.com/milvus-io/milvus/internal/msgstream"
@@ -40,11 +41,12 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/masterpb"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 )
 
 // grpc wrapper
 type Server struct {
-	masterService *cms.Core
+	masterService types.MasterComponent
 	grpcServer    *grpc.Server
 	grpcErrChan   chan error
 
@@ -58,18 +60,24 @@ type Server struct {
 	indexService types.IndexService
 	queryService types.QueryService
 
+	newProxyServiceClient func(string) types.ProxyService
+	newDataServiceClient  func(string) types.DataService
+	newIndexServiceClient func(string) types.IndexService
+	newQueryServiceClient func(string) (types.QueryService, error)
+
 	connectProxyService bool
 	connectDataService  bool
 	connectIndexService bool
 	connectQueryService bool
 
+	etcdKV *etcdkv.EtcdKV
+	signal <-chan bool
+
 	closer io.Closer
 }
 
 func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
-
 	ctx1, cancel := context.WithCancel(ctx)
-
 	s := &Server{
 		ctx:                 ctx1,
 		cancel:              cancel,
@@ -79,13 +87,28 @@ func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) 
 		connectIndexService: true,
 		connectQueryService: true,
 	}
-
+	s.setClient()
 	var err error
 	s.masterService, err = cms.NewCore(s.ctx, factory)
 	if err != nil {
 		return nil, err
 	}
 	return s, err
+}
+
+func (s *Server) setClient() {
+	s.newProxyServiceClient = func(s string) types.ProxyService {
+		return psc.NewClient(s)
+	}
+	s.newDataServiceClient = func(s string) types.DataService {
+		return dsc.NewClient(s)
+	}
+	s.newIndexServiceClient = func(s string) types.IndexService {
+		return isc.NewClient(s)
+	}
+	s.newQueryServiceClient = func(s string) (types.QueryService, error) {
+		return qsc.NewClient(s, 5*time.Second)
+	}
 }
 
 func (s *Server) Run() error {
@@ -112,6 +135,11 @@ func (s *Server) init() error {
 
 	log.Debug("init params done")
 
+	self := sessionutil.NewSession("masterservice", funcutil.GetLocalIP()+":"+strconv.Itoa(Params.Port), true)
+	sm := sessionutil.NewSessionManager(ctx, cms.Params.EtcdAddress, cms.Params.MetaRootPath, self)
+	sm.Init()
+	sessionutil.SetGlobalSessionManager(sm)
+
 	err := s.startGrpc()
 	if err != nil {
 		return err
@@ -121,7 +149,7 @@ func (s *Server) init() error {
 
 	if s.connectProxyService {
 		log.Debug("proxy service", zap.String("address", Params.ProxyServiceAddress))
-		proxyService := psc.NewClient(Params.ProxyServiceAddress)
+		proxyService := s.newProxyServiceClient(Params.ProxyServiceAddress)
 		if err := proxyService.Init(); err != nil {
 			panic(err)
 		}
@@ -134,10 +162,11 @@ func (s *Server) init() error {
 		if err = s.masterService.SetProxyService(ctx, proxyService); err != nil {
 			panic(err)
 		}
+		s.proxyService = proxyService
 	}
 	if s.connectDataService {
 		log.Debug("data service", zap.String("address", Params.DataServiceAddress))
-		dataService := dsc.NewClient(Params.DataServiceAddress)
+		dataService := s.newDataServiceClient(Params.DataServiceAddress)
 		if err := dataService.Init(); err != nil {
 			panic(err)
 		}
@@ -152,10 +181,11 @@ func (s *Server) init() error {
 		if err = s.masterService.SetDataService(ctx, dataService); err != nil {
 			panic(err)
 		}
+		s.dataService = dataService
 	}
 	if s.connectIndexService {
 		log.Debug("index service", zap.String("address", Params.IndexServiceAddress))
-		indexService := isc.NewClient(Params.IndexServiceAddress)
+		indexService := s.newIndexServiceClient(Params.IndexServiceAddress)
 		if err := indexService.Init(); err != nil {
 			panic(err)
 		}
@@ -164,9 +194,10 @@ func (s *Server) init() error {
 			panic(err)
 
 		}
+		s.indexService = indexService
 	}
 	if s.connectQueryService {
-		queryService, err := qsc.NewClient(Params.QueryServiceAddress, 5*time.Second)
+		queryService, err := s.newQueryServiceClient(Params.QueryServiceAddress)
 		if err != nil {
 			panic(err)
 		}
@@ -179,6 +210,7 @@ func (s *Server) init() error {
 		if err = s.masterService.SetQueryService(queryService); err != nil {
 			panic(err)
 		}
+		s.queryService = queryService
 	}
 	if err := s.masterService.Init(); err != nil {
 		return err

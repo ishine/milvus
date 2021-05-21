@@ -25,10 +25,18 @@ type ParamTable struct {
 
 	NodeID int64
 
-	EtcdAddress   string
-	MetaRootPath  string
-	KvRootPath    string
+	// --- ETCD ---
+	EtcdAddress             string
+	MetaRootPath            string
+	KvRootPath              string
+	SegmentBinlogSubPath    string
+	CollectionBinlogSubPath string
+
+	// --- Pulsar ---
 	PulsarAddress string
+
+	FlushStreamPosSubPath string
+	StatsStreamPosSubPath string
 
 	// segment
 	SegmentSize           float64
@@ -67,6 +75,9 @@ func (p *ParamTable) Init() {
 		p.initEtcdAddress()
 		p.initMetaRootPath()
 		p.initKvRootPath()
+		p.initSegmentBinlogSubPath()
+		p.initCollectionBinlogSubPath()
+
 		p.initPulsarAddress()
 
 		p.initSegmentSize()
@@ -83,6 +94,9 @@ func (p *ParamTable) Init() {
 		p.initSegmentFlushMetaPath()
 		p.initLogCfg()
 		p.initProxyServiceTimeTickChannelName()
+
+		p.initFlushStreamPosSubPath()
+		p.initStatsStreamPosSubPath()
 	})
 }
 
@@ -129,6 +143,23 @@ func (p *ParamTable) initKvRootPath() {
 	}
 	p.KvRootPath = rootPath + "/" + subPath
 }
+
+func (p *ParamTable) initSegmentBinlogSubPath() {
+	subPath, err := p.Load("etcd.segmentBinlogSubPath")
+	if err != nil {
+		panic(err)
+	}
+	p.SegmentBinlogSubPath = subPath
+}
+
+func (p *ParamTable) initCollectionBinlogSubPath() {
+	subPath, err := p.Load("etcd.collectionBinlogSubPath")
+	if err != nil {
+		panic(err)
+	}
+	p.CollectionBinlogSubPath = subPath
+}
+
 func (p *ParamTable) initSegmentSize() {
 	p.SegmentSize = p.ParseFloat("dataservice.segment.size")
 }
@@ -256,4 +287,20 @@ func (p *ParamTable) initProxyServiceTimeTickChannelName() {
 		panic(err)
 	}
 	p.ProxyTimeTickChannelName = ch
+}
+
+func (p *ParamTable) initFlushStreamPosSubPath() {
+	subPath, err := p.Load("etcd.flushStreamPosSubPath")
+	if err != nil {
+		panic(err)
+	}
+	p.FlushStreamPosSubPath = subPath
+}
+
+func (p *ParamTable) initStatsStreamPosSubPath() {
+	subPath, err := p.Load("etcd.statsStreamPosSubPath")
+	if err != nil {
+		panic(err)
+	}
+	p.StatsStreamPosSubPath = subPath
 }

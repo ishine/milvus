@@ -32,6 +32,7 @@ import (
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
 	otgrpc "github.com/opentracing-contrib/go-grpc"
 	"github.com/opentracing/opentracing-go"
@@ -53,9 +54,12 @@ type Server struct {
 	grpcServer    *grpc.Server
 	masterService types.MasterService
 
+	newMasterServiceClient func(string) (types.MasterService, error)
+
 	closer io.Closer
 }
 
+// NewServer new data service grpc server
 func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
 	var err error
 	ctx1, cancel := context.WithCancel(ctx)
@@ -64,8 +68,10 @@ func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) 
 		ctx:         ctx1,
 		cancel:      cancel,
 		grpcErrChan: make(chan error),
+		newMasterServiceClient: func(s string) (types.MasterService, error) {
+			return msc.NewClient(s, 10*time.Second)
+		},
 	}
-
 	s.dataService, err = dataservice.CreateServer(s.ctx, factory)
 	if err != nil {
 		return nil, err
@@ -77,44 +83,58 @@ func (s *Server) init() error {
 	Params.Init()
 	Params.LoadFromEnv()
 
+	ctx := context.Background()
+
 	closer := trace.InitTracing("data_service")
 	s.closer = closer
 
-	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port)
-	// wait for grpc server loop start
-	if err := <-s.grpcErrChan; err != nil {
+	dataservice.Params.Init()
+
+	self := sessionutil.NewSession("dataservice", funcutil.GetLocalIP()+":"+strconv.Itoa(Params.Port), true)
+	sm := sessionutil.NewSessionManager(ctx, dataservice.Params.EtcdAddress, dataservice.Params.MetaRootPath, self)
+	sm.Init()
+	sessionutil.SetGlobalSessionManager(sm)
+
+	err := s.startGrpc()
+	if err != nil {
 		return err
 	}
 
-	log.Debug("master address", zap.String("address", Params.MasterAddress))
-	client, err := msc.NewClient(Params.MasterAddress, 10*time.Second)
-	if err != nil {
-		panic(err)
-	}
-	log.Debug("master client create complete")
-	if err = client.Init(); err != nil {
-		panic(err)
-	}
-	if err = client.Start(); err != nil {
-		panic(err)
-	}
 	s.dataService.UpdateStateCode(internalpb.StateCode_Initializing)
 
-	ctx := context.Background()
-	err = funcutil.WaitForComponentInitOrHealthy(ctx, client, "MasterService", 1000000, time.Millisecond*200)
+	if s.newMasterServiceClient != nil {
+		log.Debug("master service", zap.String("address", Params.MasterAddress))
+		masterServiceClient, err := s.newMasterServiceClient(Params.MasterAddress)
+		if err != nil {
+			panic(err)
+		}
+		log.Debug("master service client created")
 
-	if err != nil {
-		panic(err)
+		if err = masterServiceClient.Init(); err != nil {
+			panic(err)
+		}
+		if err = masterServiceClient.Start(); err != nil {
+			panic(err)
+		}
+		if err = funcutil.WaitForComponentInitOrHealthy(ctx, masterServiceClient, "MasterService", 1000000, 200*time.Millisecond); err != nil {
+			panic(err)
+		}
+		s.dataService.SetMasterClient(masterServiceClient)
 	}
-	s.dataService.SetMasterClient(client)
 
-	dataservice.Params.Init()
 	if err := s.dataService.Init(); err != nil {
 		log.Error("dataService init error", zap.Error(err))
 		return err
 	}
 	return nil
+}
+
+func (s *Server) startGrpc() error {
+	s.wg.Add(1)
+	go s.startGrpcLoop(Params.Port)
+	// wait for grpc server loop start
+	err := <-s.grpcErrChan
+	return err
 }
 
 func (s *Server) startGrpcLoop(grpcPort int) {
@@ -176,7 +196,6 @@ func (s *Server) Stop() error {
 }
 
 func (s *Server) Run() error {
-
 	if err := s.init(); err != nil {
 		return err
 	}
@@ -242,4 +261,9 @@ func (s *Server) GetPartitionStatistics(ctx context.Context, req *datapb.GetPart
 
 func (s *Server) GetSegmentInfoChannel(ctx context.Context, req *datapb.GetSegmentInfoChannelRequest) (*milvuspb.StringResponse, error) {
 	return s.dataService.GetSegmentInfoChannel(ctx)
+}
+
+//SaveBinlogPaths implement DataServiceServer, saves segment, collection binlog according to datanode request
+func (s *Server) SaveBinlogPaths(ctx context.Context, req *datapb.SaveBinlogPathsRequest) (*commonpb.Status, error) {
+	return s.dataService.SaveBinlogPaths(ctx, req)
 }

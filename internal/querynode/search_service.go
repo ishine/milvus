@@ -37,9 +37,19 @@ type searchService struct {
 }
 
 func newSearchService(ctx context.Context, replica ReplicaInterface, factory msgstream.Factory) *searchService {
-	// query node doesn't need to consumer any search or search result channel actively.
 	searchStream, _ := factory.NewQueryMsgStream(ctx)
 	searchResultStream, _ := factory.NewQueryMsgStream(ctx)
+
+	if len(Params.SearchChannelNames) > 0 && len(Params.SearchResultChannelNames) > 0 {
+		// query node need to consumer search channels and produce search result channels when init.
+		consumeChannels := Params.SearchChannelNames
+		consumeSubName := Params.MsgChannelSubName
+		searchStream.AsConsumer(consumeChannels, consumeSubName)
+		log.Debug("query node AsConsumer", zap.Any("searchChannels", consumeChannels), zap.Any("consumeSubName", consumeSubName))
+		producerChannels := Params.SearchResultChannelNames
+		searchResultStream.AsProducer(producerChannels)
+		log.Debug("query node AsProducer", zap.Any("searchResultChannels", producerChannels))
+	}
 
 	searchServiceCtx, searchServiceCancel := context.WithCancel(ctx)
 	return &searchService{

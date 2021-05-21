@@ -360,7 +360,7 @@ func (node *ProxyNode) DescribeCollection(ctx context.Context, request *milvuspb
 }
 
 func (node *ProxyNode) GetCollectionStatistics(ctx context.Context, request *milvuspb.GetCollectionStatisticsRequest) (*milvuspb.GetCollectionStatisticsResponse, error) {
-	g := &GetCollectionsStatisticsTask{
+	g := &GetCollectionStatisticsTask{
 		ctx:                            ctx,
 		Condition:                      NewTaskCondition(ctx),
 		GetCollectionStatisticsRequest: request,
@@ -685,7 +685,52 @@ func (node *ProxyNode) ReleasePartitions(ctx context.Context, request *milvuspb.
 }
 
 func (node *ProxyNode) GetPartitionStatistics(ctx context.Context, request *milvuspb.GetPartitionStatisticsRequest) (*milvuspb.GetPartitionStatisticsResponse, error) {
-	panic("implement me")
+	g := &GetPartitionStatisticsTask{
+		ctx:                           ctx,
+		Condition:                     NewTaskCondition(ctx),
+		GetPartitionStatisticsRequest: request,
+		dataService:                   node.dataService,
+	}
+
+	err := node.sched.DdQueue.Enqueue(g)
+	if err != nil {
+		return &milvuspb.GetPartitionStatisticsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			},
+		}, nil
+	}
+
+	log.Debug("GetPartitionStatistics",
+		zap.String("role", Params.RoleName),
+		zap.Int64("msgID", request.Base.MsgID),
+		zap.Uint64("timestamp", request.Base.Timestamp),
+		zap.String("db", request.DbName),
+		zap.String("collection", request.CollectionName),
+		zap.String("partition", request.PartitionName))
+	defer func() {
+		log.Debug("GetPartitionStatistics Done",
+			zap.Error(err),
+			zap.String("role", Params.RoleName),
+			zap.Int64("msgID", request.Base.MsgID),
+			zap.Uint64("timestamp", request.Base.Timestamp),
+			zap.String("db", request.DbName),
+			zap.String("collection", request.CollectionName),
+			zap.String("partition", request.PartitionName))
+	}()
+
+	err = g.WaitToFinish()
+	if err != nil {
+		return &milvuspb.GetPartitionStatisticsResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			},
+		}, nil
+	}
+
+	return g.result, nil
 }
 
 func (node *ProxyNode) ShowPartitions(ctx context.Context, request *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
@@ -883,6 +928,63 @@ func (node *ProxyNode) DropIndex(ctx context.Context, request *milvuspb.DropInde
 	return dit.result, nil
 }
 
+// GetIndexBuildProgress gets index build progress with filed_name and index_name.
+// IndexRows is the num of indexed rows. And TotalRows is the total number of segment rows.
+func (node *ProxyNode) GetIndexBuildProgress(ctx context.Context, request *milvuspb.GetIndexBuildProgressRequest) (*milvuspb.GetIndexBuildProgressResponse, error) {
+	gibpt := &GetIndexBuildProgressTask{
+		ctx:                          ctx,
+		Condition:                    NewTaskCondition(ctx),
+		GetIndexBuildProgressRequest: request,
+		indexService:                 node.indexService,
+		masterService:                node.masterService,
+		dataService:                  node.dataService,
+	}
+
+	err := node.sched.DdQueue.Enqueue(gibpt)
+	if err != nil {
+		return &milvuspb.GetIndexBuildProgressResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			},
+		}, nil
+	}
+
+	log.Debug("GetIndexBuildProgress",
+		zap.String("role", Params.RoleName),
+		zap.Int64("msgID", request.Base.MsgID),
+		zap.Uint64("timestamp", request.Base.Timestamp),
+		zap.String("db", request.DbName),
+		zap.String("collection", request.CollectionName),
+		zap.String("field", request.FieldName),
+		zap.String("index name", request.IndexName))
+	defer func() {
+		log.Debug("GetIndexBuildProgress Done",
+			zap.Error(err),
+			zap.String("role", Params.RoleName),
+			zap.Int64("msgID", request.Base.MsgID),
+			zap.Uint64("timestamp", request.Base.Timestamp),
+			zap.String("db", request.DbName),
+			zap.String("collection", request.CollectionName),
+			zap.String("field", request.FieldName),
+			zap.String("index name", request.IndexName))
+	}()
+
+	err = gibpt.WaitToFinish()
+	if err != nil {
+		return &milvuspb.GetIndexBuildProgressResponse{
+			Status: &commonpb.Status{
+				ErrorCode: commonpb.ErrorCode_UnexpectedError,
+				Reason:    err.Error(),
+			},
+		}, nil
+	}
+	log.Debug("progress", zap.Any("result", gibpt.result))
+	log.Debug("progress", zap.Any("status", gibpt.result.Status))
+
+	return gibpt.result, nil
+}
+
 func (node *ProxyNode) GetIndexState(ctx context.Context, request *milvuspb.GetIndexStateRequest) (*milvuspb.GetIndexStateResponse, error) {
 	dipt := &GetIndexStateTask{
 		ctx:                  ctx,
@@ -1065,6 +1167,10 @@ func (node *ProxyNode) Search(ctx context.Context, request *milvuspb.SearchReque
 	}
 
 	return qt.result, nil
+}
+
+func (node *ProxyNode) Retrieve(ctx context.Context, request *milvuspb.RetrieveRequest) (*milvuspb.RetrieveResults, error) {
+	return nil, nil
 }
 
 func (node *ProxyNode) Flush(ctx context.Context, request *milvuspb.FlushRequest) (*commonpb.Status, error) {

@@ -22,9 +22,6 @@ import (
 )
 
 type ParamTable struct {
-	// === PRIVATE Configs ===
-	dataNodeIDList []UniqueID
-
 	paramtable.BaseTable
 
 	// === DataNode Internal Components Configs ===
@@ -34,9 +31,9 @@ type ParamTable struct {
 	FlowGraphMaxQueueLength int32
 	FlowGraphMaxParallelism int32
 	FlushInsertBufferSize   int32
-	FlushDdBufferSize       int32
 	InsertBinlogRootPath    string
 	DdlBinlogRootPath       string
+	StatsBinlogRootPath     string
 	Log                     log.Config
 
 	// === DataNode External Components Configs ===
@@ -64,8 +61,8 @@ type ParamTable struct {
 	// --- ETCD ---
 	EtcdAddress         string
 	MetaRootPath        string
-	SegFlushMetaSubPath string
-	DDLFlushMetaSubPath string
+	SegFlushMetaSubPath string // GOOSE TODO remove
+	DDLFlushMetaSubPath string // GOOSE TODO remove
 
 	// --- MinIO ---
 	MinioAddress         string
@@ -91,9 +88,9 @@ func (p *ParamTable) Init() {
 		p.initFlowGraphMaxQueueLength()
 		p.initFlowGraphMaxParallelism()
 		p.initFlushInsertBufferSize()
-		p.initFlushDdBufferSize()
 		p.initInsertBinlogRootPath()
 		p.initDdlBinlogRootPath()
+		p.initStatsBinlogRootPath()
 		p.initLogCfg()
 
 		// === DataNode External Components Configs ===
@@ -112,8 +109,8 @@ func (p *ParamTable) Init() {
 		// --- ETCD ---
 		p.initEtcdAddress()
 		p.initMetaRootPath()
-		p.initSegFlushMetaSubPath()
-		p.initDDLFlushMetaSubPath()
+		p.initSegFlushMetaSubPath() // GOOSE TODO remove
+		p.initDDLFlushMetaSubPath() // GOOSE TODO remove
 
 		// --- MinIO ---
 		p.initMinioAddress()
@@ -126,21 +123,17 @@ func (p *ParamTable) Init() {
 
 // ==== DataNode internal components configs ====
 func (p *ParamTable) initNodeID() {
-	p.dataNodeIDList = p.DataNodeIDList()
 	dataNodeIDStr := os.Getenv("DATA_NODE_ID")
 	if dataNodeIDStr == "" {
-		if len(p.dataNodeIDList) <= 0 {
-			dataNodeIDStr = "0"
-		} else {
-			dataNodeIDStr = strconv.Itoa(int(p.dataNodeIDList[0]))
-		}
+		dataNodeIDStr = "1"
 	}
-	err := p.Save("_dataNodeID", dataNodeIDStr)
+
+	dnID, err := strconv.Atoi(dataNodeIDStr)
 	if err != nil {
 		panic(err)
 	}
 
-	p.NodeID = p.ParseInt64("_dataNodeID")
+	p.NodeID = UniqueID(dnID)
 }
 
 // ---- flowgraph configs ----
@@ -155,10 +148,6 @@ func (p *ParamTable) initFlowGraphMaxParallelism() {
 // ---- flush configs ----
 func (p *ParamTable) initFlushInsertBufferSize() {
 	p.FlushInsertBufferSize = p.ParseInt32("datanode.flush.insertBufSize")
-}
-
-func (p *ParamTable) initFlushDdBufferSize() {
-	p.FlushDdBufferSize = p.ParseInt32("datanode.flush.ddBufSize")
 }
 
 func (p *ParamTable) initInsertBinlogRootPath() {
@@ -177,6 +166,14 @@ func (p *ParamTable) initDdlBinlogRootPath() {
 		panic(err)
 	}
 	p.DdlBinlogRootPath = path.Join(rootPath, "data_definition_log")
+}
+
+func (p *ParamTable) initStatsBinlogRootPath() {
+	rootPath, err := p.Load("etcd.rootPath")
+	if err != nil {
+		panic(err)
+	}
+	p.StatsBinlogRootPath = path.Join(rootPath, "stats_log")
 }
 
 // ---- Pulsar ----
@@ -227,6 +224,7 @@ func (p *ParamTable) initMetaRootPath() {
 	p.MetaRootPath = path.Join(rootPath, subPath)
 }
 
+// GOOSE TODO remove
 func (p *ParamTable) initSegFlushMetaSubPath() {
 	subPath, err := p.Load("etcd.segFlushMetaSubPath")
 	if err != nil {
@@ -235,6 +233,7 @@ func (p *ParamTable) initSegFlushMetaSubPath() {
 	p.SegFlushMetaSubPath = subPath
 }
 
+// GOOSE TODO remove
 func (p *ParamTable) initDDLFlushMetaSubPath() {
 	subPath, err := p.Load("etcd.ddlFlushMetaSubPath")
 	if err != nil {
@@ -281,17 +280,6 @@ func (p *ParamTable) initMinioBucketName() {
 		panic(err)
 	}
 	p.MinioBucketName = bucketName
-}
-
-func (p *ParamTable) sliceIndex() int {
-	dataNodeID := p.NodeID
-	dataNodeIDList := p.dataNodeIDList
-	for i := 0; i < len(dataNodeIDList); i++ {
-		if dataNodeID == dataNodeIDList[i] {
-			return i
-		}
-	}
-	return -1
 }
 
 func (p *ParamTable) initLogCfg() {

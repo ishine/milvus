@@ -13,7 +13,9 @@ package dataservice
 import (
 	"context"
 	"math"
+	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
@@ -80,11 +82,17 @@ func TestGetInsertChannels(t *testing.T) {
 }
 
 func TestAssignSegmentID(t *testing.T) {
+	const collID = 100
+	const collIDInvalid = 101
+	const partID = 0
+	const channel0 = "channel0"
+	const channel1 = "channel1"
+
 	svr := newTestServer(t)
 	defer closeTestServer(t, svr)
 	schema := newTestSchema()
 	svr.meta.AddCollection(&datapb.CollectionInfo{
-		ID:         0,
+		ID:         collID,
 		Schema:     schema,
 		Partitions: []int64{},
 	})
@@ -98,12 +106,12 @@ func TestAssignSegmentID(t *testing.T) {
 		PartitionID  UniqueID
 		ChannelName  string
 		Count        uint32
-		IsSuccess    bool
+		Success      bool
 	}{
-		{"assign segment normally", 0, 0, "channel0", 1000, true},
-		{"assign segment with unexisted collection", 1, 0, "channel0", 1000, false},
-		{"assign with max count", 0, 0, "channel0", uint32(maxCount), true},
-		{"assign with max uint32 count", 0, 0, "channel1", math.MaxUint32, false},
+		{"assign segment normally", collID, partID, channel0, 1000, true},
+		{"assign segment with invalid collection", collIDInvalid, partID, channel0, 1000, false},
+		{"assign with max count", collID, partID, channel0, uint32(maxCount), true},
+		{"assign with max uint32 count", collID, partID, channel1, math.MaxUint32, false},
 	}
 
 	for _, test := range cases {
@@ -123,7 +131,7 @@ func TestAssignSegmentID(t *testing.T) {
 			assert.Nil(t, err)
 			assert.EqualValues(t, 1, len(resp.SegIDAssignments))
 			assign := resp.SegIDAssignments[0]
-			if test.IsSuccess {
+			if test.Success {
 				assert.EqualValues(t, commonpb.ErrorCode_Success, assign.Status.ErrorCode)
 				assert.EqualValues(t, test.CollectionID, assign.CollectionID)
 				assert.EqualValues(t, test.PartitionID, assign.PartitionID)
@@ -197,22 +205,8 @@ func TestFlush(t *testing.T) {
 		Partitions: []int64{},
 	})
 	assert.Nil(t, err)
-	segments := []struct {
-		id           UniqueID
-		collectionID UniqueID
-	}{
-		{1, 0},
-		{2, 0},
-	}
-	for _, segment := range segments {
-		err = svr.segAllocator.OpenSegment(context.TODO(), &datapb.SegmentInfo{
-			ID:           segment.id,
-			CollectionID: segment.collectionID,
-			PartitionID:  0,
-			State:        commonpb.SegmentState_Growing,
-		})
-		assert.Nil(t, err)
-	}
+	segID, _, _, err := svr.segAllocator.AllocSegment(context.TODO(), 0, 1, "channel-1", 1)
+	assert.Nil(t, err)
 	resp, err := svr.Flush(context.TODO(), &datapb.FlushRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_Flush,
@@ -227,7 +221,8 @@ func TestFlush(t *testing.T) {
 	assert.EqualValues(t, commonpb.ErrorCode_Success, resp.ErrorCode)
 	ids, err := svr.segAllocator.GetSealedSegments(context.TODO())
 	assert.Nil(t, err)
-	assert.ElementsMatch(t, ids, []UniqueID{1, 2})
+	assert.EqualValues(t, 1, len(ids))
+	assert.EqualValues(t, segID, ids[0])
 }
 
 func TestGetComponentStates(t *testing.T) {
@@ -338,6 +333,439 @@ func TestGetSegmentStates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetInsertBinlogPaths(t *testing.T) {
+	svr := newTestServer(t)
+	defer closeTestServer(t, svr)
+
+	req := &datapb.GetInsertBinlogPathsRequest{
+		SegmentID: 0,
+	}
+	resp, err := svr.GetInsertBinlogPaths(svr.ctx, req)
+	assert.Nil(t, err)
+	assert.EqualValues(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+}
+
+func TestGetCollectionStatistics(t *testing.T) {
+	svr := newTestServer(t)
+	defer closeTestServer(t, svr)
+
+	req := &datapb.GetCollectionStatisticsRequest{
+		CollectionID: 0,
+	}
+	resp, err := svr.GetCollectionStatistics(svr.ctx, req)
+	assert.Nil(t, err)
+	assert.EqualValues(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+}
+
+func TestGetSegmentInfo(t *testing.T) {
+	svr := newTestServer(t)
+	defer closeTestServer(t, svr)
+
+	segInfo := &datapb.SegmentInfo{
+		ID: 0,
+	}
+	svr.meta.AddSegment(segInfo)
+
+	req := &datapb.GetSegmentInfoRequest{
+		SegmentIDs: []int64{0},
+	}
+	resp, err := svr.GetSegmentInfo(svr.ctx, req)
+	assert.Nil(t, err)
+	assert.EqualValues(t, commonpb.ErrorCode_Success, resp.Status.ErrorCode)
+}
+
+func TestChannel(t *testing.T) {
+	svr := newTestServer(t)
+	defer closeTestServer(t, svr)
+
+	t.Run("Test StatsChannel", func(t *testing.T) {
+		const segID = 0
+		const rowNum = int64(100)
+
+		segInfo := &datapb.SegmentInfo{
+			ID: segID,
+		}
+		svr.meta.AddSegment(segInfo)
+
+		stats := &internalpb.SegmentStatisticsUpdates{
+			SegmentID: segID,
+			NumRows:   rowNum,
+		}
+		genMsg := func(msgType commonpb.MsgType, t Timestamp) *msgstream.SegmentStatisticsMsg {
+			return &msgstream.SegmentStatisticsMsg{
+				BaseMsg: msgstream.BaseMsg{
+					HashValues: []uint32{0},
+				},
+				SegmentStatistics: internalpb.SegmentStatistics{
+					Base: &commonpb.MsgBase{
+						MsgType:   msgType,
+						MsgID:     0,
+						Timestamp: t,
+						SourceID:  0,
+					},
+					SegStats: []*internalpb.SegmentStatisticsUpdates{stats},
+				},
+			}
+		}
+
+		statsStream, _ := svr.msFactory.NewMsgStream(svr.ctx)
+		statsStream.AsProducer([]string{Params.StatisticsChannelName})
+		statsStream.Start()
+		defer statsStream.Close()
+
+		msgPack := msgstream.MsgPack{}
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentStatistics, 123))
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentInfo, 234))
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentStatistics, 345))
+		err := statsStream.Produce(&msgPack)
+		assert.Nil(t, err)
+	})
+
+	t.Run("Test SegmentFlushChannel", func(t *testing.T) {
+		genMsg := func(msgType commonpb.MsgType, t Timestamp) *msgstream.FlushCompletedMsg {
+			return &msgstream.FlushCompletedMsg{
+				BaseMsg: msgstream.BaseMsg{
+					HashValues: []uint32{0},
+				},
+				SegmentFlushCompletedMsg: internalpb.SegmentFlushCompletedMsg{
+					Base: &commonpb.MsgBase{
+						MsgType:   msgType,
+						MsgID:     0,
+						Timestamp: t,
+						SourceID:  0,
+					},
+					SegmentID: 0,
+				},
+			}
+		}
+
+		segInfoStream, _ := svr.msFactory.NewMsgStream(svr.ctx)
+		segInfoStream.AsProducer([]string{Params.SegmentInfoChannelName})
+		segInfoStream.Start()
+		defer segInfoStream.Close()
+
+		msgPack := msgstream.MsgPack{}
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentFlushDone, 123))
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentInfo, 234))
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentFlushDone, 345))
+		err := segInfoStream.Produce(&msgPack)
+		assert.Nil(t, err)
+		time.Sleep(time.Second)
+	})
+
+	t.Run("Test ProxyTimeTickChannel", func(t *testing.T) {
+		genMsg := func(msgType commonpb.MsgType, t Timestamp) *msgstream.TimeTickMsg {
+			return &msgstream.TimeTickMsg{
+				BaseMsg: msgstream.BaseMsg{
+					HashValues: []uint32{0},
+				},
+				TimeTickMsg: internalpb.TimeTickMsg{
+					Base: &commonpb.MsgBase{
+						MsgType:   msgType,
+						MsgID:     0,
+						Timestamp: t,
+						SourceID:  0,
+					},
+				},
+			}
+		}
+
+		timeTickStream, _ := svr.msFactory.NewMsgStream(svr.ctx)
+		timeTickStream.AsProducer([]string{Params.ProxyTimeTickChannelName})
+		timeTickStream.Start()
+		defer timeTickStream.Close()
+
+		msgPack := msgstream.MsgPack{}
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_TimeTick, 123))
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentInfo, 234))
+		msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_TimeTick, 345))
+		err := timeTickStream.Produce(&msgPack)
+		assert.Nil(t, err)
+		time.Sleep(time.Second)
+	})
+}
+
+func TestSaveBinlogPaths(t *testing.T) {
+	svr := newTestServer(t)
+	defer closeTestServer(t, svr)
+
+	collections := []struct {
+		ID         UniqueID
+		Partitions []int64
+	}{
+		{0, []int64{0, 1}},
+		{1, []int64{0, 1}},
+	}
+
+	for _, collection := range collections {
+		err := svr.meta.AddCollection(&datapb.CollectionInfo{
+			ID:         collection.ID,
+			Schema:     nil,
+			Partitions: collection.Partitions,
+		})
+		assert.Nil(t, err)
+	}
+
+	segments := []struct {
+		id           UniqueID
+		collectionID UniqueID
+		partitionID  UniqueID
+	}{
+		{0, 0, 0},
+		{1, 0, 0},
+		{2, 0, 1},
+		{3, 1, 1},
+	}
+	for _, segment := range segments {
+		err := svr.meta.AddSegment(&datapb.SegmentInfo{
+			ID:           segment.id,
+			CollectionID: segment.collectionID,
+			PartitionID:  segment.partitionID,
+		})
+		assert.Nil(t, err)
+	}
+	t.Run("Normal SaveRequest", func(t *testing.T) {
+		ctx := context.Background()
+		resp, err := svr.SaveBinlogPaths(ctx, &datapb.SaveBinlogPathsRequest{
+			SegmentID:    2,
+			CollectionID: 0,
+			Field2BinlogPaths: &datapb.ID2PathList{
+				ID:    1,
+				Paths: []string{"/by-dev/test/0/1/2/1/Allo1", "/by-dev/test/0/1/2/1/Allo2"},
+			},
+			Coll2TsBinlogPaths: &datapb.ID2PathList{
+				ID:    0,
+				Paths: []string{"/by-dev/test/0/ts/Allo5", "/by-dev/test/0/ts/Allo8"},
+			},
+			Coll2DdlBinlogPaths: &datapb.ID2PathList{
+				ID:    0,
+				Paths: []string{"/by-dev/test/0/ddl/Allo7", "/by-dev/test/0/ddl/Allo9"},
+			},
+		})
+		assert.Nil(t, err)
+		assert.EqualValues(t, resp.ErrorCode, commonpb.ErrorCode_Success)
+
+		metas, err := svr.getFieldBinlogMeta(2, 1)
+		assert.Nil(t, err)
+		if assert.EqualValues(t, 2, len(metas)) {
+			assert.EqualValues(t, 1, metas[0].FieldID)
+			assert.EqualValues(t, "/by-dev/test/0/1/2/1/Allo1", metas[0].BinlogPath)
+			assert.EqualValues(t, 1, metas[1].FieldID)
+			assert.EqualValues(t, "/by-dev/test/0/1/2/1/Allo2", metas[1].BinlogPath)
+		}
+
+		metas, err = svr.getSegmentBinlogMeta(2)
+		assert.Nil(t, err)
+		if assert.EqualValues(t, 2, len(metas)) {
+			assert.EqualValues(t, 1, metas[0].FieldID)
+			assert.EqualValues(t, "/by-dev/test/0/1/2/1/Allo1", metas[0].BinlogPath)
+			assert.EqualValues(t, 1, metas[1].FieldID)
+			assert.EqualValues(t, "/by-dev/test/0/1/2/1/Allo2", metas[1].BinlogPath)
+		}
+
+		collMetas, err := svr.getDDLBinlogMeta(0)
+		assert.Nil(t, err)
+		if assert.EqualValues(t, 2, len(collMetas)) {
+			assert.EqualValues(t, "/by-dev/test/0/ts/Allo5", collMetas[0].TsBinlogPath)
+			assert.EqualValues(t, "/by-dev/test/0/ddl/Allo7", collMetas[0].DdlBinlogPath)
+			assert.EqualValues(t, "/by-dev/test/0/ts/Allo8", collMetas[1].TsBinlogPath)
+			assert.EqualValues(t, "/by-dev/test/0/ddl/Allo9", collMetas[1].DdlBinlogPath)
+		}
+
+	})
+	t.Run("Abnormal SaveRequest", func(t *testing.T) {
+		ctx := context.Background()
+		resp, err := svr.SaveBinlogPaths(ctx, &datapb.SaveBinlogPathsRequest{
+			SegmentID:    10,
+			CollectionID: 5,
+			Field2BinlogPaths: &datapb.ID2PathList{
+				ID:    1,
+				Paths: []string{"/by-dev/test/0/1/2/1/Allo1", "/by-dev/test/0/1/2/1/Allo2"},
+			},
+			Coll2TsBinlogPaths: &datapb.ID2PathList{
+				ID:    0,
+				Paths: []string{"/by-dev/test/0/ts/Allo5", "/by-dev/test/0/ts/Allo8"},
+			},
+			Coll2DdlBinlogPaths: &datapb.ID2PathList{
+				ID:    0,
+				Paths: []string{"/by-dev/test/0/ddl/Allo7", "/by-dev/test/0/ddl/Allo9"},
+			},
+		})
+		assert.NotNil(t, err)
+		assert.EqualValues(t, resp.ErrorCode, commonpb.ErrorCode_UnexpectedError)
+	})
+}
+
+func TestResumeChannel(t *testing.T) {
+	Params.Init()
+
+	segmentIDs := make([]int64, 0, 1000)
+
+	t.Run("Prepare Resume test set", func(t *testing.T) {
+		svr := newTestServer(t)
+		defer svr.Stop()
+
+		i := int64(-1)
+		cnt := 0
+		for ; cnt < 1000; i-- {
+			svr.meta.RLock()
+			_, has := svr.meta.segments[i]
+			svr.meta.RUnlock()
+			if has {
+				continue
+			}
+			err := svr.meta.AddSegment(&datapb.SegmentInfo{
+				ID:           i,
+				CollectionID: -1,
+			})
+			assert.Nil(t, err)
+			segmentIDs = append(segmentIDs, i)
+			cnt++
+		}
+	})
+
+	t.Run("Test ResumeSegmentStatsChannel", func(t *testing.T) {
+		svr := newTestServer(t)
+
+		segRows := rand.Int63n(1000)
+
+		statsStream, _ := svr.msFactory.NewMsgStream(svr.ctx)
+		statsStream.AsProducer([]string{Params.StatisticsChannelName})
+		statsStream.Start()
+		defer statsStream.Close()
+
+		genMsg := func(msgType commonpb.MsgType, t Timestamp, stats *internalpb.SegmentStatisticsUpdates) *msgstream.SegmentStatisticsMsg {
+			return &msgstream.SegmentStatisticsMsg{
+				BaseMsg: msgstream.BaseMsg{
+					HashValues: []uint32{0},
+				},
+				SegmentStatistics: internalpb.SegmentStatistics{
+					Base: &commonpb.MsgBase{
+						MsgType:   msgType,
+						MsgID:     0,
+						Timestamp: t,
+						SourceID:  0,
+					},
+					SegStats: []*internalpb.SegmentStatisticsUpdates{stats},
+				},
+			}
+		}
+		ch := make(chan struct{})
+
+		go func() {
+			for _, segID := range segmentIDs {
+				stats := &internalpb.SegmentStatisticsUpdates{
+					SegmentID: segID,
+					NumRows:   segRows,
+				}
+
+				msgPack := msgstream.MsgPack{}
+				msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentStatistics, uint64(time.Now().Unix()), stats))
+
+				err := statsStream.Produce(&msgPack)
+				assert.Nil(t, err)
+				time.Sleep(time.Millisecond * 5)
+			}
+			ch <- struct{}{}
+		}()
+
+		time.Sleep(time.Second)
+
+		svr.Stop()
+		time.Sleep(time.Millisecond * 50)
+
+		svr = newTestServer(t)
+		defer svr.Stop()
+		<-ch
+
+		//wait for Server processing last messages
+		time.Sleep(time.Second)
+
+		svr.meta.RLock()
+		defer svr.meta.RUnlock()
+		for _, segID := range segmentIDs {
+			seg, has := svr.meta.segments[segID]
+			assert.True(t, has)
+			if has {
+				assert.Equal(t, segRows, seg.NumRows)
+			}
+		}
+	})
+
+	t.Run("Test ResumeSegmentFlushChannel", func(t *testing.T) {
+		genMsg := func(msgType commonpb.MsgType, t Timestamp, segID int64) *msgstream.FlushCompletedMsg {
+			return &msgstream.FlushCompletedMsg{
+				BaseMsg: msgstream.BaseMsg{
+					HashValues: []uint32{0},
+				},
+				SegmentFlushCompletedMsg: internalpb.SegmentFlushCompletedMsg{
+					Base: &commonpb.MsgBase{
+						MsgType:   msgType,
+						MsgID:     0,
+						Timestamp: t,
+						SourceID:  0,
+					},
+					SegmentID: segID,
+				},
+			}
+		}
+		svr := newTestServer(t)
+
+		ch := make(chan struct{})
+
+		segInfoStream, _ := svr.msFactory.NewMsgStream(svr.ctx)
+		segInfoStream.AsProducer([]string{Params.SegmentInfoChannelName})
+		segInfoStream.Start()
+		defer segInfoStream.Close()
+		go func() {
+			for _, segID := range segmentIDs {
+
+				msgPack := msgstream.MsgPack{}
+				msgPack.Msgs = append(msgPack.Msgs, genMsg(commonpb.MsgType_SegmentFlushDone, uint64(time.Now().Unix()), segID))
+
+				err := segInfoStream.Produce(&msgPack)
+				assert.Nil(t, err)
+				time.Sleep(time.Millisecond * 5)
+			}
+			ch <- struct{}{}
+		}()
+
+		time.Sleep(time.Millisecond * 50)
+		//stop current server, simulating server quit
+		svr.Stop()
+
+		time.Sleep(time.Second)
+		// start new test server as restarting
+		svr = newTestServer(t)
+		defer svr.Stop()
+		<-ch
+
+		//wait for Server processing last messages
+		time.Sleep(time.Second)
+
+		//ASSERT PART
+		svr.meta.RLock()
+		defer svr.meta.RUnlock()
+		for _, segID := range segmentIDs {
+			seg, has := svr.meta.segments[segID]
+			assert.True(t, has)
+			if has {
+				assert.Equal(t, seg.State, commonpb.SegmentState_Flushed)
+			}
+		}
+	})
+
+	t.Run("Clean up test segments", func(t *testing.T) {
+		svr := newTestServer(t)
+		defer closeTestServer(t, svr)
+		var err error
+		for _, segID := range segmentIDs {
+			err = svr.meta.DropSegment(segID)
+			assert.Nil(t, err)
+		}
+	})
 }
 
 func newTestServer(t *testing.T) *Server {

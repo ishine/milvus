@@ -8,6 +8,7 @@
 // Unless required by applicable law or agreed to in writing, software distributed under the License
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
+// GOOSE TODO remove this
 
 package datanode
 
@@ -20,9 +21,10 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/datapb"
 )
 
-// ddl binlog meta key:
+// binlogMeta persists binlog paths into etcd.
+// ddl binlog etcd meta key:
 //   ${prefix}/${collectionID}/${idx}
-// segment binlog meta key:
+// segment binlog etcd meta key:
 //   ${prefix}/${segmentID}/${fieldID}/${idx}
 type binlogMeta struct {
 	client      kv.TxnKV // etcd kv
@@ -37,8 +39,13 @@ func NewBinlogMeta(kv kv.TxnKV, idAllocator allocatorInterface) (*binlogMeta, er
 	return mt, nil
 }
 
-// if alloc is true, the returned keys will have a generated-unique ID at the end.
-// if alloc is false, the returned keys will only consist of provided ids.
+func (bm *binlogMeta) allocID() (key UniqueID, err error) {
+	return bm.idAllocator.allocID()
+}
+
+// genKey gives a valid key string for lists of UniqueIDs:
+//  if alloc is true, the returned keys will have a generated-unique ID at the end.
+//  if alloc is false, the returned keys will only consist of provided ids.
 func (bm *binlogMeta) genKey(alloc bool, ids ...UniqueID) (key string, err error) {
 	if alloc {
 		idx, err := bm.idAllocator.allocID()
@@ -57,22 +64,27 @@ func (bm *binlogMeta) genKey(alloc bool, ids ...UniqueID) (key string, err error
 	return
 }
 
-func (bm *binlogMeta) SaveSegmentBinlogMetaTxn(segmentID UniqueID, field2Path map[UniqueID]string) error {
+// SaveSegmentBinlogMetaTxn stores all fields' binlog paths of a segment in a transaction.
+// segment binlog etcd meta key:
+//   ${prefix}/${segmentID}/${fieldID}/${idx}
+func (bm *binlogMeta) SaveSegmentBinlogMetaTxn(segmentID UniqueID, field2Path map[UniqueID][]string) error {
 
-	kvs := make(map[string]string, len(field2Path))
-	for fieldID, p := range field2Path {
-		key, err := bm.genKey(true, segmentID, fieldID)
-		if err != nil {
-			return err
+	etcdKey2binlogPath := make(map[string]string)
+	for fieldID, paths := range field2Path {
+		for _, p := range paths {
+			key, err := bm.genKey(true, segmentID, fieldID)
+			if err != nil {
+				return err
+			}
+
+			binlogPath := proto.MarshalTextString(&datapb.SegmentFieldBinlogMeta{
+				FieldID:    fieldID,
+				BinlogPath: p,
+			})
+			etcdKey2binlogPath[path.Join(Params.SegFlushMetaSubPath, key)] = binlogPath
 		}
-
-		v := proto.MarshalTextString(&datapb.SegmentFieldBinlogMeta{
-			FieldID:    fieldID,
-			BinlogPath: p,
-		})
-		kvs[path.Join(Params.SegFlushMetaSubPath, key)] = v
 	}
-	return bm.client.MultiSave(kvs)
+	return bm.client.MultiSave(etcdKey2binlogPath)
 }
 
 func (bm *binlogMeta) getFieldBinlogMeta(segmentID UniqueID,
@@ -123,21 +135,18 @@ func (bm *binlogMeta) getSegmentBinlogMeta(segmentID UniqueID) (metas []*datapb.
 	return
 }
 
+// SaveDDLBinlogMetaTxn stores timestamp and ddl binlog path pair into etcd in a transaction.
 // ddl binlog meta key:
 //   ${prefix}/${collectionID}/${idx}
-// --- DDL ---
-func (bm *binlogMeta) SaveDDLBinlogMetaTxn(collID UniqueID, tsPath string, ddlPath string) error {
+func (bm *binlogMeta) SaveDDLBinlogMetaTxn(collID UniqueID, ddlBinlogMeta *datapb.DDLBinlogMeta) error {
 
-	k, err := bm.genKey(true, collID)
+	uniqueKey, err := bm.genKey(true, collID)
 	if err != nil {
 		return err
 	}
-	v := proto.MarshalTextString(&datapb.DDLBinlogMeta{
-		DdlBinlogPath: ddlPath,
-		TsBinlogPath:  tsPath,
-	})
+	binlogPathPair := proto.MarshalTextString(ddlBinlogMeta)
 
-	return bm.client.Save(path.Join(Params.DDLFlushMetaSubPath, k), v)
+	return bm.client.Save(path.Join(Params.DDLFlushMetaSubPath, uniqueKey), binlogPathPair)
 }
 
 func (bm *binlogMeta) getDDLBinlogMete(collID UniqueID) (metas []*datapb.DDLBinlogMeta, err error) {

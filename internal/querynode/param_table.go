@@ -26,7 +26,7 @@ type ParamTable struct {
 	paramtable.BaseTable
 
 	PulsarAddress string
-	ETCDAddress   string
+	EtcdAddress   string
 	MetaRootPath  string
 
 	QueryNodeIP              string
@@ -46,6 +46,8 @@ type ParamTable struct {
 	MinioBucketName      string
 
 	// search
+	SearchChannelNames         []string
+	SearchResultChannelNames   []string
 	SearchReceiveBufSize       int64
 	SearchPulsarBufSize        int64
 	SearchResultReceiveBufSize int64
@@ -98,7 +100,7 @@ func (p *ParamTable) Init() {
 		p.initMinioBucketName()
 
 		p.initPulsarAddress()
-		p.initETCDAddress()
+		p.initEtcdAddress()
 		p.initMetaRootPath()
 
 		p.initGracefulTime()
@@ -225,12 +227,12 @@ func (p *ParamTable) initSearchResultReceiveBufSize() {
 	p.SearchResultReceiveBufSize = p.ParseInt64("queryNode.msgStream.searchResult.recvBufSize")
 }
 
-func (p *ParamTable) initETCDAddress() {
-	ETCDAddress, err := p.Load("_EtcdAddress")
+func (p *ParamTable) initEtcdAddress() {
+	EtcdAddress, err := p.Load("_EtcdAddress")
 	if err != nil {
 		panic(err)
 	}
-	p.ETCDAddress = ETCDAddress
+	p.EtcdAddress = EtcdAddress
 }
 
 func (p *ParamTable) initMetaRootPath() {

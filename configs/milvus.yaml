@@ -12,7 +12,6 @@
 
 nodeID: # will be deprecated later
   queryNodeIDList: [1]
-  dataNodeIDList: [3]
 
 etcd:
   address: localhost
@@ -22,6 +21,10 @@ etcd:
   kvSubPath: kv # kvRootPath = rootPath + '/' + kvSubPath
   segFlushMetaSubPath: datanode/segment # Full Path = rootPath/metaSubPath/segFlushMetaSubPath
   ddlFlushMetaSubPath: datanode/ddl     # Full Path = rootPath/metaSubPath/ddlFlushMetaSubPath
+  segmentBinlogSubPath: dataservice/binlog/segment  # Full Path = rootPath/metaSubPath/segmentBinlogSubPath
+  collectionBinlogSubPath: dataservice/binlog/collection # Full Path = rootPath/metaSubPath/collectionBinglogSubPath
+  flushStreamPosSubPath: dataservice/flushstream # Full path = rootPath/metaSubPath/flushStreamPosSubPath
+  statsStreamPosSubPath: dataservice/statsstream # Full path = rootPath/metaSubPath/statsStreamPosSubPath
 
 minio:
   address: localhost
@@ -52,7 +55,7 @@ proxyService:
   port: 21122
 
 queryNode:
-  gracefulTime: 5000 # ms, for search
+  gracefulTime: 1000 # ms, for search
   port: 21123
 
 indexService:

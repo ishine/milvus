@@ -1,0 +1,22 @@
+version: '3.5'
+
+services:
+  pytest:
+    image: ${IMAGE_REPO}/pytest:${IMAGE_TAG}
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+      cache_from:
+        - ${IMAGE_REPO}/pytest:latest
+    shm_size: 2G
+    environment:
+      SERVICE_IP: ${SERVICE_IP}
+      SERVICE_PORT: ${SERVICE_PORT}
+    volumes:
+      - ../../:/milvus:delegated
+    working_dir: "/milvus"
+
+networks:
+  default:
+    external:
+      name: ${PRE_EXIST_NETWORK}

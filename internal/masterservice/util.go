@@ -12,8 +12,10 @@
 package masterservice
 
 import (
+	"encoding/json"
 	"fmt"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
@@ -48,4 +50,46 @@ func GetFieldSchemaByID(coll *etcdpb.CollectionInfo, fieldID typeutil.UniqueID) 
 		}
 	}
 	return nil, fmt.Errorf("field id = %d not found", fieldID)
+}
+
+//GetFieldSchemaByIndexID return the field schema by it's index id
+func GetFieldSchemaByIndexID(coll *etcdpb.CollectionInfo, idxID typeutil.UniqueID) (*schemapb.FieldSchema, error) {
+	var fieldID typeutil.UniqueID
+	exist := false
+	for _, f := range coll.FieldIndexes {
+		if f.IndexID == idxID {
+			fieldID = f.FiledID
+			exist = true
+			break
+		}
+	}
+	if !exist {
+		return nil, fmt.Errorf("index id = %d is not attach to any field", idxID)
+	}
+	return GetFieldSchemaByID(coll, fieldID)
+}
+
+// EncodeDdOperation serialize DdOperation into string
+func EncodeDdOperation(m proto.Message, m1 proto.Message, ddType string) (string, error) {
+	mStr := proto.MarshalTextString(m)
+	m1Str := proto.MarshalTextString(m1)
+	ddOp := DdOperation{
+		Body:  mStr,
+		Body1: m1Str, // used for DdCreateCollection only
+		Type:  ddType,
+	}
+	ddOpByte, err := json.Marshal(ddOp)
+	if err != nil {
+		return "", err
+	}
+	return string(ddOpByte), nil
+}
+
+// SegmentIndexInfoEqual return true if 2 SegmentIndexInfo are identical
+func SegmentIndexInfoEqual(info1 *etcdpb.SegmentIndexInfo, info2 *etcdpb.SegmentIndexInfo) bool {
+	return info1.SegmentID == info2.SegmentID &&
+		info1.FieldID == info2.FieldID &&
+		info1.IndexID == info2.IndexID &&
+		info1.BuildID == info2.BuildID &&
+		info1.EnableIndex == info2.EnableIndex
 }

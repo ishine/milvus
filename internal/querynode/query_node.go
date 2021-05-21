@@ -115,6 +115,7 @@ func NewQueryNodeWithoutID(ctx context.Context, factory msgstream.Factory) *Quer
 
 func (node *QueryNode) Init() error {
 	ctx := context.Background()
+
 	C.SegcoreInit()
 	registerReq := &queryPb.RegisterNodeRequest{
 		Base: &commonpb.MsgBase{
@@ -140,6 +141,10 @@ func (node *QueryNode) Init() error {
 			Params.StatsChannelName = kv.Value
 		case "TimeTickChannelName":
 			Params.QueryTimeTickChannelName = kv.Value
+		case "SearchChannelName":
+			Params.SearchChannelNames = append(Params.SearchChannelNames, kv.Value)
+		case "SearchResultChannelName":
+			Params.SearchResultChannelNames = append(Params.SearchResultChannelNames, kv.Value)
 		default:
 			return fmt.Errorf("Invalid key: %v", kv.Key)
 		}

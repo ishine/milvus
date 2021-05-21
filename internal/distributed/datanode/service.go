@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	otgrpc "github.com/opentracing-contrib/go-grpc"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
@@ -39,6 +40,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/funcutil"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
 	"github.com/milvus-io/milvus/internal/util/trace"
 )
 
@@ -55,16 +57,29 @@ type Server struct {
 	masterService types.MasterService
 	dataService   types.DataService
 
+	etcdKV *etcdkv.EtcdKV
+	signal <-chan bool
+
+	newMasterServiceClient func(string) (types.MasterService, error)
+	newDataServiceClient   func(string) types.DataService
+
 	closer io.Closer
 }
 
-func New(ctx context.Context, factory msgstream.Factory) (*Server, error) {
+// NewServer new data node grpc server
+func NewServer(ctx context.Context, factory msgstream.Factory) (*Server, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	var s = &Server{
 		ctx:         ctx1,
 		cancel:      cancel,
 		msFactory:   factory,
 		grpcErrChan: make(chan error),
+		newMasterServiceClient: func(s string) (types.MasterService, error) {
+			return msc.NewClient(s, 20*time.Second)
+		},
+		newDataServiceClient: func(s string) types.DataService {
+			return dsc.NewClient(Params.DataServiceAddress)
+		},
 	}
 
 	s.datanode = dn.NewDataNode(s.ctx, s.msFactory)
@@ -72,18 +87,16 @@ func New(ctx context.Context, factory msgstream.Factory) (*Server, error) {
 	return s, nil
 }
 
-func (s *Server) startGrpcLoop(grpcPort int) {
+func (s *Server) startGrpc() error {
+	s.wg.Add(1)
+	go s.startGrpcLoop(Params.listener)
+	// wait for grpc server loop start
+	err := <-s.grpcErrChan
+	return err
+}
+
+func (s *Server) startGrpcLoop(listener net.Listener) {
 	defer s.wg.Done()
-
-	addr := ":" + strconv.Itoa(grpcPort)
-
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Warn("GrpcServer failed to listen", zap.Error(err))
-		s.grpcErrChan <- err
-		return
-	}
-	log.Debug("DataNode address", zap.String("address", addr))
 
 	tracer := opentracing.GlobalTracer()
 	s.grpcServer = grpc.NewServer(
@@ -99,7 +112,7 @@ func (s *Server) startGrpcLoop(grpcPort int) {
 	defer cancel()
 
 	go funcutil.CheckGrpcReady(ctx, s.grpcErrChan)
-	if err := s.grpcServer.Serve(lis); err != nil {
+	if err := s.grpcServer.Serve(listener); err != nil {
 		log.Warn("DataNode Start Grpc Failed!")
 		s.grpcErrChan <- err
 	}
@@ -115,7 +128,6 @@ func (s *Server) SetDataServiceInterface(ds types.DataService) error {
 }
 
 func (s *Server) Run() error {
-
 	if err := s.init(); err != nil {
 		return err
 	}
@@ -150,10 +162,6 @@ func (s *Server) Stop() error {
 func (s *Server) init() error {
 	ctx := context.Background()
 	Params.Init()
-	if !funcutil.CheckPortAvailable(Params.Port) {
-		Params.Port = funcutil.GetAvailablePort()
-		log.Warn("DataNode init", zap.Any("Port", Params.Port))
-	}
 	Params.LoadFromEnv()
 	Params.LoadFromArgs()
 
@@ -161,60 +169,62 @@ func (s *Server) init() error {
 	dn.Params.Port = Params.Port
 	dn.Params.IP = Params.IP
 
-	log.Debug("DataNode port", zap.Int("port", Params.Port))
-
 	closer := trace.InitTracing(fmt.Sprintf("data_node ip: %s, port: %d", Params.IP, Params.Port))
 	s.closer = closer
+	addr := Params.IP + ":" + strconv.Itoa(Params.Port)
+	log.Debug("DataNode address", zap.String("address", addr))
 
-	s.wg.Add(1)
-	go s.startGrpcLoop(Params.Port)
-	// wait for grpc server loop start
-	err := <-s.grpcErrChan
+	self := sessionutil.NewSession("datanode", funcutil.GetLocalIP()+":"+strconv.Itoa(Params.Port), false)
+	sm := sessionutil.NewSessionManager(ctx, dn.Params.EtcdAddress, dn.Params.MetaRootPath, self)
+	sm.Init()
+	sessionutil.SetGlobalSessionManager(sm)
+
+	err := s.startGrpc()
 	if err != nil {
 		return err
 	}
 
 	// --- Master Server Client ---
-	log.Debug("Master service address", zap.String("address", Params.MasterAddress))
-	log.Debug("Init master service client ...")
-	masterClient, err := msc.NewClient(Params.MasterAddress, 20*time.Second)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = masterClient.Init(); err != nil {
-		panic(err)
-	}
-
-	if err = masterClient.Start(); err != nil {
-		panic(err)
-	}
-	err = funcutil.WaitForComponentHealthy(ctx, masterClient, "MasterService", 1000000, time.Millisecond*200)
-
-	if err != nil {
-		panic(err)
-	}
-
-	if err := s.SetMasterServiceInterface(masterClient); err != nil {
-		panic(err)
+	if s.newMasterServiceClient != nil {
+		log.Debug("Master service address", zap.String("address", Params.MasterAddress))
+		log.Debug("Init master service client ...")
+		masterServiceClient, err := s.newMasterServiceClient(Params.MasterAddress)
+		if err != nil {
+			panic(err)
+		}
+		if err = masterServiceClient.Init(); err != nil {
+			panic(err)
+		}
+		if err = masterServiceClient.Start(); err != nil {
+			panic(err)
+		}
+		err = funcutil.WaitForComponentHealthy(ctx, masterServiceClient, "MasterService", 1000000, time.Millisecond*200)
+		if err != nil {
+			panic(err)
+		}
+		if err = s.SetMasterServiceInterface(masterServiceClient); err != nil {
+			panic(err)
+		}
 	}
 
 	// --- Data Server Client ---
-	log.Debug("Data service address", zap.String("address", Params.DataServiceAddress))
-	log.Debug("DataNode Init data service client ...")
-	dataService := dsc.NewClient(Params.DataServiceAddress)
-	if err = dataService.Init(); err != nil {
-		panic(err)
-	}
-	if err = dataService.Start(); err != nil {
-		panic(err)
-	}
-	err = funcutil.WaitForComponentInitOrHealthy(ctx, dataService, "DataService", 1000000, time.Millisecond*200)
-	if err != nil {
-		panic(err)
-	}
-	if err := s.SetDataServiceInterface(dataService); err != nil {
-		panic(err)
+	if s.newDataServiceClient != nil {
+		log.Debug("Data service address", zap.String("address", Params.DataServiceAddress))
+		log.Debug("DataNode Init data service client ...")
+		dataServiceClient := s.newDataServiceClient(Params.DataServiceAddress)
+		if err = dataServiceClient.Init(); err != nil {
+			panic(err)
+		}
+		if err = dataServiceClient.Start(); err != nil {
+			panic(err)
+		}
+		err = funcutil.WaitForComponentInitOrHealthy(ctx, dataServiceClient, "DataService", 1000000, time.Millisecond*200)
+		if err != nil {
+			panic(err)
+		}
+		if err = s.SetDataServiceInterface(dataServiceClient); err != nil {
+			panic(err)
+		}
 	}
 
 	s.datanode.NodeID = dn.Params.NodeID

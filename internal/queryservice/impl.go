@@ -112,11 +112,11 @@ func (qs *QueryService) RegisterNode(ctx context.Context, req *querypb.RegisterN
 	qs.qcMutex.Lock()
 	for _, queryChannel := range qs.queryChannels {
 		startParams = append(startParams, &commonpb.KeyValuePair{
-			Key:   "QueryChannelName",
+			Key:   "SearchChannelName",
 			Value: queryChannel.requestChannel,
 		})
 		startParams = append(startParams, &commonpb.KeyValuePair{
-			Key:   "QueryResultChannelName",
+			Key:   "SearchResultChannelName",
 			Value: queryChannel.responseChannel,
 		})
 	}
@@ -402,8 +402,8 @@ func (qs *QueryService) ReleasePartitions(ctx context.Context, req *querypb.Rele
 
 func (qs *QueryService) CreateQueryChannel(ctx context.Context) (*querypb.CreateQueryChannelResponse, error) {
 	channelID := len(qs.queryChannels)
-	searchPrefix := Params.SearchChannelName
-	searchResultPrefix := Params.SearchResultChannelName
+	searchPrefix := Params.SearchChannelPrefix
+	searchResultPrefix := Params.SearchResultChannelPrefix
 	allocatedQueryChannel := searchPrefix + "-" + strconv.FormatInt(int64(channelID), 10)
 	allocatedQueryResultChannel := searchResultPrefix + "-" + strconv.FormatInt(int64(channelID), 10)
 

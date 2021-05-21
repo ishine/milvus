@@ -118,6 +118,10 @@ func newMockMasterService() *mockMasterService {
 	return &mockMasterService{}
 }
 
+func (m *mockMasterService) GetTimeTickChannel(ctx context.Context) (*milvuspb.StringResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMasterService) Init() error {
 	return nil
 }
@@ -166,11 +170,13 @@ func (m *mockMasterService) HasCollection(ctx context.Context, req *milvuspb.Has
 func (m *mockMasterService) DescribeCollection(ctx context.Context, req *milvuspb.DescribeCollectionRequest) (*milvuspb.DescribeCollectionResponse, error) {
 	return &milvuspb.DescribeCollectionResponse{
 		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_UnexpectedError,
+			ErrorCode: commonpb.ErrorCode_Success,
 			Reason:    "",
 		},
-		Schema:       nil,
-		CollectionID: 0,
+		Schema: &schemapb.CollectionSchema{
+			Name: "test",
+		},
+		CollectionID: 1314,
 	}, nil
 }
 
@@ -180,7 +186,7 @@ func (m *mockMasterService) ShowCollections(ctx context.Context, req *milvuspb.S
 			ErrorCode: commonpb.ErrorCode_Success,
 			Reason:    "",
 		},
-		CollectionNames: []string{},
+		CollectionNames: []string{"test"},
 	}, nil
 }
 
@@ -197,7 +203,14 @@ func (m *mockMasterService) HasPartition(ctx context.Context, req *milvuspb.HasP
 }
 
 func (m *mockMasterService) ShowPartitions(ctx context.Context, req *milvuspb.ShowPartitionsRequest) (*milvuspb.ShowPartitionsResponse, error) {
-	panic("not implemented") // TODO: Implement
+	return &milvuspb.ShowPartitionsResponse{
+		Status: &commonpb.Status{
+			ErrorCode: commonpb.ErrorCode_Success,
+			Reason:    "",
+		},
+		PartitionNames: []string{"_default"},
+		PartitionIDs:   []int64{0},
+	}, nil
 }
 
 //index builder service
