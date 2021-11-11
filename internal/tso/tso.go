@@ -70,12 +70,12 @@ type timestampOracle struct {
 
 func (t *timestampOracle) loadTimestamp() (time.Time, error) {
 	strData, err := t.txnKV.Load(t.key)
-
-	var binData []byte = []byte(strData)
-
 	if err != nil {
-		return typeutil.ZeroTime, err
+		// intend to return nil
+		return typeutil.ZeroTime, nil
 	}
+
+	var binData = []byte(strData)
 	if len(binData) == 0 {
 		return typeutil.ZeroTime, nil
 	}
@@ -85,7 +85,8 @@ func (t *timestampOracle) loadTimestamp() (time.Time, error) {
 // save timestamp, if lastTs is 0, we think the timestamp doesn't exist, so create it,
 // otherwise, update it.
 func (t *timestampOracle) saveTimestamp(ts time.Time) error {
-	data := typeutil.Uint64ToBytes(uint64(ts.UnixNano()))
+	//we use big endian here for compatibility issues
+	data := typeutil.Uint64ToBytesBigEndian(uint64(ts.UnixNano()))
 	err := t.txnKV.Save(t.key, string(data))
 	if err != nil {
 		return errors.WithStack(err)
@@ -95,30 +96,30 @@ func (t *timestampOracle) saveTimestamp(ts time.Time) error {
 }
 
 func (t *timestampOracle) InitTimestamp() error {
-
-	//last, err := t.loadTimestamp()
-	//if err != nil {
-	//	return err
-	//}
-
+	last, err := t.loadTimestamp()
+	if err != nil {
+		return err
+	}
 	next := time.Now()
 
 	// If the current system time minus the saved etcd timestamp is less than `updateTimestampGuard`,
 	// the timestamp allocation will start from the saved etcd timestamp temporarily.
-	//if typeutil.SubTimeByWallClock(next, last) < updateTimestampGuard {
-	//	next = last.Add(updateTimestampGuard)
-	//}
+	if typeutil.SubTimeByWallClock(next, last) < updateTimestampGuard {
+		next = last.Add(updateTimestampGuard)
+	}
 
 	save := next.Add(t.saveInterval)
 	if err := t.saveTimestamp(save); err != nil {
 		return err
 	}
 
-	//log.Print("sync and save timestamp", zap.Time("last", last), zap.Time("save", save), zap.Time("next", next))
+	log.Print("sync and save timestamp", zap.Time("last", last), zap.Time("save", save), zap.Time("next", next))
 
 	current := &atomicObject{
 		physical: next,
 	}
+	// atomic unsafe pointer
+	/* #nosec G103 */
 	atomic.StorePointer(&t.TSO, unsafe.Pointer(current))
 
 	return nil
@@ -146,6 +147,8 @@ func (t *timestampOracle) ResetUserTimestamp(tso uint64) error {
 	update := &atomicObject{
 		physical: next,
 	}
+	// atomic unsafe pointer
+	/* #nosec G103 */
 	atomic.CompareAndSwapPointer(&t.TSO, unsafe.Pointer(prev), unsafe.Pointer(update))
 	return nil
 }
@@ -198,7 +201,8 @@ func (t *timestampOracle) UpdateTimestamp() error {
 		physical: next,
 		logical:  0,
 	}
-
+	// atomic unsafe pointer
+	/* #nosec G103 */
 	atomic.StorePointer(&t.TSO, unsafe.Pointer(current))
 
 	return nil
@@ -209,5 +213,7 @@ func (t *timestampOracle) ResetTimestamp() {
 	zero := &atomicObject{
 		physical: time.Now(),
 	}
+	// atomic unsafe pointer
+	/* #nosec G103 */
 	atomic.StorePointer(&t.TSO, unsafe.Pointer(zero))
 }

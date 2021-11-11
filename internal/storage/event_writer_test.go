@@ -16,13 +16,24 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/stretchr/testify/assert"
 )
 
+func TestEventTypeCode_String(t *testing.T) {
+	var code EventTypeCode = 127
+	res := code.String()
+	assert.Equal(t, res, "InvalidEventType")
+
+	code = DeleteEventType
+	res = code.String()
+	assert.Equal(t, res, "DeleteEventType")
+}
+
 func TestSizeofStruct(t *testing.T) {
 	var buf bytes.Buffer
-	err := binary.Write(&buf, binary.LittleEndian, baseEventHeader{})
+	err := binary.Write(&buf, common.Endian, baseEventHeader{})
 	assert.Nil(t, err)
 	s1 := binary.Size(baseEventHeader{})
 	s2 := binary.Size(&baseEventHeader{})
@@ -37,7 +48,7 @@ func TestSizeofStruct(t *testing.T) {
 	}
 	err = de.Write(&buf)
 	assert.Nil(t, err)
-	s3 := binary.Size(de.DescriptorEventDataFixPart) + binary.Size(de.PostHeaderLengths)
+	s3 := binary.Size(de.DescriptorEventDataFixPart) + binary.Size(de.PostHeaderLengths) + binary.Size(de.ExtraLength) + int(de.ExtraLength)
 	assert.Equal(t, s3, buf.Len())
 }
 
@@ -66,8 +77,7 @@ func TestEventWriter(t *testing.T) {
 	err = insertEvent.AddInt32ToPayload([]int32{1})
 	assert.NotNil(t, err)
 	buffer := new(bytes.Buffer)
-	insertEvent.SetStartTimestamp(100)
-	insertEvent.SetEndTimestamp(200)
+	insertEvent.SetEventTimestamp(100, 200)
 	err = insertEvent.Write(buffer)
 	assert.Nil(t, err)
 	length, err = insertEvent.GetMemoryUsageInBytes()
@@ -75,5 +85,24 @@ func TestEventWriter(t *testing.T) {
 	assert.EqualValues(t, length, buffer.Len())
 	err = insertEvent.Close()
 	assert.Nil(t, err)
+}
 
+func TestReadMagicNumber(t *testing.T) {
+	var err error
+	buf := bytes.Buffer{}
+
+	// eof
+	_, err = readMagicNumber(&buf)
+	assert.Error(t, err)
+
+	// not a magic number
+	_ = binary.Write(&buf, common.Endian, MagicNumber+1)
+	_, err = readMagicNumber(&buf)
+	assert.Error(t, err)
+
+	// normal case
+	_ = binary.Write(&buf, common.Endian, MagicNumber)
+	num, err := readMagicNumber(&buf)
+	assert.NoError(t, err)
+	assert.Equal(t, MagicNumber, num)
 }

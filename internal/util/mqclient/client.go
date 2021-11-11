@@ -11,6 +11,7 @@
 
 package mqclient
 
+// Client is the interface that provides operations of message queues
 type Client interface {
 	// Create a producer instance
 	CreateProducer(options ProducerOptions) (Producer, error)
@@ -24,7 +25,7 @@ type Client interface {
 	// String to msg ID
 	StringToMsgID(string) (MessageID, error)
 
-	// Bytes to msg ID
+	// Deserialize MessageId from a byte array
 	BytesToMsgID([]byte) (MessageID, error)
 
 	// Close the client and free associated resources

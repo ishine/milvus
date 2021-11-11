@@ -10,12 +10,7 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include "query/Plan.h"
-#include "query/PlanImpl.h"
-#include "query/PlanNode.h"
 #include "query/ExprImpl.h"
-#include "utils/Json.h"
-#include "exceptions/EasyAssert.h"
-#include "pb/milvus.pb.h"
 #include <vector>
 #include <memory>
 #include <boost/algorithm/string.hpp>
@@ -27,13 +22,6 @@
 #include "query/generated/ShowPlanNodeVisitor.h"
 
 namespace milvus::query {
-
-/// initialize RangeExpr::mapping_
-const std::map<std::string, RangeExpr::OpType> RangeExpr::mapping_ = {
-    {"lt", OpType::LessThan},    {"le", OpType::LessEqual},    {"lte", OpType::LessEqual},
-    {"gt", OpType::GreaterThan}, {"ge", OpType::GreaterEqual}, {"gte", OpType::GreaterEqual},
-    {"eq", OpType::Equal},       {"ne", OpType::NotEqual},
-};
 
 // static inline std::string
 // to_lower(const std::string& raw) {
@@ -84,6 +72,10 @@ class Parser {
     ExprPtr
     ParseTermNode(const Json& out_body);
 
+    // parse the value of "term" entry
+    ExprPtr
+    ParseCompareNode(const Json& out_body);
+
  private:
     // template implementation of leaf parser
     // used by corresponding parser
@@ -101,6 +93,34 @@ class Parser {
     std::map<std::string, FieldOffset> tag2field_;  // PlaceholderName -> field offset
     std::optional<std::unique_ptr<VectorPlanNode>> vector_node_opt_;
 };
+
+ExprPtr
+Parser::ParseCompareNode(const Json& out_body) {
+    Assert(out_body.is_object());
+    Assert(out_body.size() == 1);
+    auto out_iter = out_body.begin();
+    auto op_name = boost::algorithm::to_lower_copy(std::string(out_iter.key()));
+    AssertInfo(mapping_.count(op_name), "op(" + op_name + ") not found");
+    auto body = out_iter.value();
+    Assert(body.is_array());
+    Assert(body.size() == 2);
+    auto expr = std::make_unique<CompareExpr>();
+    expr->op_type_ = mapping_.at(op_name);
+
+    auto& item0 = body[0];
+    Assert(item0.is_string());
+    auto left_field_name = FieldName(item0.get<std::string>());
+    expr->left_data_type_ = schema[left_field_name].get_data_type();
+    expr->left_field_offset_ = schema.get_offset(left_field_name);
+
+    auto& item1 = body[1];
+    Assert(item1.is_string());
+    auto right_field_name = FieldName(item1.get<std::string>());
+    expr->right_data_type_ = schema[right_field_name].get_data_type();
+    expr->right_field_offset_ = schema.get_offset(right_field_name);
+
+    return expr;
+}
 
 ExprPtr
 Parser::ParseRangeNode(const Json& out_body) {
@@ -200,9 +220,9 @@ Parser::ParseVecNode(const Json& out_body) {
 
     auto& vec_info = iter.value();
     Assert(vec_info.is_object());
-    auto topK = vec_info["topk"];
-    AssertInfo(topK > 0, "topK must greater than 0");
-    AssertInfo(topK < 16384, "topK is too large");
+    auto topk = vec_info["topk"];
+    AssertInfo(topk > 0, "topk must greater than 0");
+    AssertInfo(topk < 16384, "topk is too large");
 
     auto field_offset = schema.get_offset(field_name);
 
@@ -215,10 +235,11 @@ Parser::ParseVecNode(const Json& out_body) {
             return std::make_unique<BinaryVectorANNS>();
         }
     }();
-    vec_node->query_info_.topK_ = topK;
-    vec_node->query_info_.metric_type_ = GetMetricType(vec_info.at("metric_type"));
-    vec_node->query_info_.search_params_ = vec_info.at("params");
-    vec_node->query_info_.field_offset_ = field_offset;
+    vec_node->search_info_.topk_ = topk;
+    vec_node->search_info_.metric_type_ = GetMetricType(vec_info.at("metric_type"));
+    vec_node->search_info_.search_params_ = vec_info.at("params");
+    vec_node->search_info_.field_offset_ = field_offset;
+    vec_node->search_info_.round_decimal_ = vec_info.at("round_decimal");
     vec_node->placeholder_tag_ = vec_info.at("query");
     auto tag = vec_node->placeholder_tag_;
     AssertInfo(!tag2field_.count(tag), "duplicated placeholder tag");
@@ -258,17 +279,11 @@ Parser::ParseTermNodeImpl(const FieldName& field_name, const Json& body) {
 template <typename T>
 ExprPtr
 Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
-    auto expr = std::make_unique<RangeExprImpl<T>>();
-    auto& field_meta = schema[field_name];
-    auto data_type = field_meta.get_data_type();
-    expr->data_type_ = data_type;
-    expr->field_offset_ = schema.get_offset(field_name);
     Assert(body.is_object());
-    for (auto& item : body.items()) {
+    if (body.size() == 1) {
+        auto item = body.begin();
         auto op_name = boost::algorithm::to_lower_copy(std::string(item.key()));
-
-        AssertInfo(RangeExpr::mapping_.count(op_name), "op(" + op_name + ") not found");
-        auto op = RangeExpr::mapping_.at(op_name);
+        AssertInfo(mapping_.count(op_name), "op(" + op_name + ") not found");
         if constexpr (std::is_same_v<T, bool>) {
             Assert(item.value().is_boolean());
         } else if constexpr (std::is_integral_v<T>) {
@@ -279,11 +294,62 @@ Parser::ParseRangeNodeImpl(const FieldName& field_name, const Json& body) {
             static_assert(always_false<T>, "unsupported type");
             __builtin_unreachable();
         }
-        T value = item.value();
-        expr->conditions_.emplace_back(op, value);
+        auto expr = std::make_unique<UnaryRangeExprImpl<T>>();
+        expr->data_type_ = schema[field_name].get_data_type();
+        expr->field_offset_ = schema.get_offset(field_name);
+        expr->op_type_ = mapping_.at(op_name);
+        expr->value_ = item.value();
+        return expr;
+    } else if (body.size() == 2) {
+        bool has_lower_value = false;
+        bool has_upper_value = false;
+        bool lower_inclusive = false;
+        bool upper_inclusive = false;
+        T lower_value;
+        T upper_value;
+        for (auto& item : body.items()) {
+            auto op_name = boost::algorithm::to_lower_copy(std::string(item.key()));
+            AssertInfo(mapping_.count(op_name), "op(" + op_name + ") not found");
+            if constexpr (std::is_same_v<T, bool>) {
+                Assert(item.value().is_boolean());
+            } else if constexpr (std::is_integral_v<T>) {
+                Assert(item.value().is_number_integer());
+            } else if constexpr (std::is_floating_point_v<T>) {
+                Assert(item.value().is_number());
+            } else {
+                static_assert(always_false<T>, "unsupported type");
+                __builtin_unreachable();
+            }
+            auto op = mapping_.at(op_name);
+            switch (op) {
+                case OpType::GreaterEqual:
+                    lower_inclusive = true;
+                case OpType::GreaterThan:
+                    lower_value = item.value();
+                    has_lower_value = true;
+                    break;
+                case OpType::LessEqual:
+                    upper_inclusive = true;
+                case OpType::LessThan:
+                    upper_value = item.value();
+                    has_upper_value = true;
+                    break;
+                default:
+                    PanicInfo("unsupported operator in binary-range node");
+            }
+        }
+        AssertInfo(has_lower_value && has_upper_value, "illegal binary-range node");
+        auto expr = std::make_unique<BinaryRangeExprImpl<T>>();
+        expr->data_type_ = schema[field_name].get_data_type();
+        expr->field_offset_ = schema.get_offset(field_name);
+        expr->lower_inclusive_ = lower_inclusive;
+        expr->upper_inclusive_ = upper_inclusive;
+        expr->lower_value_ = lower_value;
+        expr->upper_value_ = upper_value;
+        return expr;
+    } else {
+        PanicInfo("illegal range node, too more or too few ops");
     }
-    std::sort(expr->conditions_.begin(), expr->conditions_.end());
-    return expr;
 }
 
 std::unique_ptr<PlaceholderGroup>
@@ -331,6 +397,13 @@ CreatePlanByExpr(const Schema& schema, const char* serialized_expr_plan, int64_t
     return ProtoParser(schema).CreatePlan(plan_node);
 }
 
+std::unique_ptr<RetrievePlan>
+CreateRetrievePlanByExpr(const Schema& schema, const char* serialized_expr_plan, int size) {
+    proto::plan::PlanNode plan_node;
+    plan_node.ParseFromArray(serialized_expr_plan, size);
+    return ProtoParser(schema).CreateRetrievePlan(plan_node);
+}
+
 std::vector<ExprPtr>
 Parser::ParseItemList(const Json& body) {
     std::vector<ExprPtr> results;
@@ -375,6 +448,8 @@ Parser::ParseAnyNode(const Json& out_body) {
         return ParseRangeNode(body);
     } else if (key == "term") {
         return ParseTermNode(body);
+    } else if (key == "compare") {
+        return ParseCompareNode(body);
     } else if (key == "vector") {
         auto vec_node = ParseVecNode(body);
         Assert(!vector_node_opt_.has_value());
@@ -422,8 +497,8 @@ ExprPtr
 Parser::ParseMustNode(const Json& body) {
     auto item_list = ParseItemList(body);
     auto merger = [](ExprPtr left, ExprPtr right) {
-        using OpType = BoolBinaryExpr::OpType;
-        auto res = std::make_unique<BoolBinaryExpr>();
+        using OpType = LogicalBinaryExpr::OpType;
+        auto res = std::make_unique<LogicalBinaryExpr>();
         res->op_type_ = OpType::LogicalAnd;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
@@ -437,8 +512,8 @@ Parser::ParseShouldNode(const Json& body) {
     auto item_list = ParseItemList(body);
     Assert(item_list.size() >= 1);
     auto merger = [](ExprPtr left, ExprPtr right) {
-        using OpType = BoolBinaryExpr::OpType;
-        auto res = std::make_unique<BoolBinaryExpr>();
+        using OpType = LogicalBinaryExpr::OpType;
+        auto res = std::make_unique<LogicalBinaryExpr>();
         res->op_type_ = OpType::LogicalOr;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
@@ -452,8 +527,8 @@ Parser::ParseMustNotNode(const Json& body) {
     auto item_list = ParseItemList(body);
     Assert(item_list.size() >= 1);
     auto merger = [](ExprPtr left, ExprPtr right) {
-        using OpType = BoolBinaryExpr::OpType;
-        auto res = std::make_unique<BoolBinaryExpr>();
+        using OpType = LogicalBinaryExpr::OpType;
+        auto res = std::make_unique<LogicalBinaryExpr>();
         res->op_type_ = OpType::LogicalAnd;
         res->left_ = std::move(left);
         res->right_ = std::move(right);
@@ -461,8 +536,8 @@ Parser::ParseMustNotNode(const Json& body) {
     };
     auto subtree = ConstructTree(merger, std::move(item_list));
 
-    using OpType = BoolUnaryExpr::OpType;
-    auto res = std::make_unique<BoolUnaryExpr>();
+    using OpType = LogicalUnaryExpr::OpType;
+    auto res = std::make_unique<LogicalUnaryExpr>();
     res->op_type_ = OpType::LogicalNot;
     res->child_ = std::move(subtree);
 
@@ -471,13 +546,23 @@ Parser::ParseMustNotNode(const Json& body) {
 
 int64_t
 GetTopK(const Plan* plan) {
-    return plan->plan_node_->query_info_.topK_;
+    return plan->plan_node_->search_info_.topk_;
 }
 
 int64_t
 GetNumOfQueries(const PlaceholderGroup* group) {
     return group->at(0).num_of_queries_;
 }
+
+// std::unique_ptr<RetrievePlan>
+// CreateRetrievePlan(const Schema& schema, proto::segcore::RetrieveRequest&& request) {
+//    auto plan = std::make_unique<RetrievePlan>();
+//    plan->ids_ = std::unique_ptr<proto::schema::IDs>(request.release_ids());
+//    for (auto& field_id : request.output_fields_id()) {
+//        plan->field_offsets_.push_back(schema.get_offset(FieldId(field_id)));
+//    }
+//    return plan;
+//}
 
 void
 Plan::check_identical(Plan& other) {

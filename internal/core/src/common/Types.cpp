@@ -14,6 +14,9 @@
 #include "exceptions/EasyAssert.h"
 #include <boost/bimap.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
+#include "common/type_c.h"
+#include "pb/schema.pb.h"
+#include "CGoHelper.h"
 
 namespace milvus {
 

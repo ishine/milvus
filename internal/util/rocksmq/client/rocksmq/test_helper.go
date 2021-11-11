@@ -13,9 +13,15 @@ package rocksmq
 
 import (
 	"fmt"
+	"os"
 	"time"
 
+	"github.com/milvus-io/milvus/internal/allocator"
+	rocksdbkv "github.com/milvus-io/milvus/internal/kv/rocksdb"
+	"github.com/milvus-io/milvus/internal/log"
+	rocksmq "github.com/milvus-io/milvus/internal/util/rocksmq/server/rocksmq"
 	server "github.com/milvus-io/milvus/internal/util/rocksmq/server/rocksmq"
+	"go.uber.org/zap"
 )
 
 func newTopicName() string {
@@ -36,4 +42,42 @@ func newMockClient() *client {
 		Server: newMockRocksMQ(),
 	})
 	return client
+}
+
+func initIDAllocator(kvPath string) *allocator.GlobalIDAllocator {
+	rocksdbKV, err := rocksdbkv.NewRocksdbKV(kvPath)
+	if err != nil {
+		panic(err)
+	}
+	idAllocator := allocator.NewGlobalIDAllocator("rmq_id", rocksdbKV)
+	_ = idAllocator.Initialize()
+	return idAllocator
+}
+
+func newRocksMQ(rmqPath string) server.RocksMQ {
+	kvPath := rmqPath + "_kv"
+	idAllocator := initIDAllocator(kvPath)
+
+	rocksdbPath := rmqPath + "_db"
+
+	rmq, _ := rocksmq.NewRocksMQ(rocksdbPath, idAllocator)
+	return rmq
+}
+
+func removePath(rmqPath string) {
+	kvPath := rmqPath + "_kv"
+	err := os.RemoveAll(kvPath)
+	if err != nil {
+		log.Error("Failed to call os.removeAll.", zap.Any("path", kvPath))
+	}
+	rocksdbPath := rmqPath + "_db"
+	err = os.RemoveAll(rocksdbPath)
+	if err != nil {
+		log.Error("Failed to call os.removeAll.", zap.Any("path", kvPath))
+	}
+	metaPath := rmqPath + "_meta_kv"
+	err = os.RemoveAll(metaPath)
+	if err != nil {
+		log.Error("Failed to call os.removeAll.", zap.Any("path", kvPath))
+	}
 }

@@ -8,11 +8,13 @@ on:
     paths:
       - 'build/docker/krte/**'
       - '.github/workflows/publish-krte-images.yaml'
+      - '!**.md'
   pull_request:
     # file paths to consider in the event. Optional; defaults to all.
     paths:
       - 'build/docker/krte/**'
       - '.github/workflows/publish-krte-images.yaml'
+      - '!**.md'
 
 jobs:
   publish-krte-images:
@@ -22,12 +24,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Check Dockerfile
-        uses: reviewdog/action-hadolint@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          reporter: github-pr-check # Default is github-pr-check
-          hadolint_ignore: DL3008 SC1091 DL3013 DL3003
       - name: Get version from system time after release step
         id: extracter
         run: |
@@ -49,3 +45,36 @@ jobs:
           export TAG=${{ steps.extracter.outputs.version }}-${{ steps.extracter.outputs.sha_short }}
           docker push "milvusdb/krte:$TAG"
           echo "Push krte image Succeeded"
+      - name: Update KRTE Image Changes
+        if: success() && github.event_name == 'push' && github.repository == 'milvus-io/milvus'
+        continue-on-error: true
+        shell: bash
+        working-directory: build/ci/jenkins/pod
+        run: |
+          export TAG=${{ steps.extracter.outputs.version }}-${{ steps.extracter.outputs.sha_short }}
+          sed -i "s#image: .*#image: milvusdb/krte:$TAG#g" krte.yaml
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add krte.yaml
+          git commit -m "Update KRTE image changes"
+      - name: Create Pull Request
+        id: cpr
+        if: success() && github.event_name == 'push' && github.repository == 'milvus-io/milvus'
+        continue-on-error: true
+        uses: peter-evans/create-pull-request@v3
+        with:
+          token: ${{ secrets.ALL_CONTRIBUTORS_TOKEN }}
+          author: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
+          signoff: false
+          branch: update_krte_${{ github.sha }}
+          delete-branch: true
+          title: '[automated] Update KRTE image changes'
+          body: |
+            Update KRTE image changes
+
+            Signed-off-by: ${{ github.actor }} ${{ github.actor }}@users.noreply.github.com
+      - name: Check outputs
+        if: success() && github.event_name == 'push' && github.repository == 'milvus-io/milvus'
+        run: |
+          echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
+          echo "Pull Request URL - ${{ steps.cpr.outputs.pull-request-url }}"

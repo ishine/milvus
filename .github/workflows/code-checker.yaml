@@ -3,19 +3,6 @@ name: Code Checker
 
 # This workflow is triggered on pushes or pull request to the repository.
 on:
-  push:
-    # file paths to consider in the event. Optional; defaults to all.
-    paths:
-      - 'scripts/**'
-      - 'internal/**'
-      - 'cmd/**'
-      - 'build/**'
-      - '.github/workflows/code-checker.yaml'
-      - '.env'
-      - docker-compose.yml
-      - Makefile
-      - '!**.md'
-      - '!build/ci/jenkins/**'
   pull_request:
     # file paths to consider in the event. Optional; defaults to all.
     paths:
@@ -29,6 +16,9 @@ on:
       - Makefile
       - '!**.md'
       - '!build/ci/jenkins/**'
+      # FIXME(wxyu): not need to run code check, update the ci-passed rules and remove these two lines
+      - go.mod
+      - go.sum
 
 jobs:
   ubuntu:
@@ -56,12 +46,6 @@ jobs:
           path: .docker/amd64-ubuntu${{ matrix.ubuntu }}-go-mod
           key: ubuntu${{ matrix.ubuntu }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: ubuntu${{ matrix.ubuntu }}-go-mod-
-      - name: Dockerfile Lint
-        uses: reviewdog/action-hadolint@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          reporter: github-pr-check # Default is github-pr-check
-          hadolint_ignore: DL3008 SC1091 DL3013 DL3003
       - name: Code Check
         env:
           CHECK_BUILDER: "1"

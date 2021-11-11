@@ -1,65 +1,62 @@
 # DataNode Recovery Design
 
+update: 5.21.2021, by [Goose](https://github.com/XuanYang-cn)  
+update: 6.03.2021, by [Goose](https://github.com/XuanYang-cn)
+update: 6.21.2021, by [Goose](https://github.com/XuanYang-cn)
+
+## What's DataNode?
+
+DataNode processes insert data and persist them.
+
+DataNode is based on flowgraph; each flowgraph cares about only one vchannel. There are ddl messages, dml
+messages, and timetick messages inside one vchannel, FIFO log stream.
+
+One vchannel only contains dml messages of one collection. A collection consists of many segments, hence
+a vchannel contains dml messages of many segments. **Most importantly, the dml messages of the same segment can appear anywhere in vchannel.**
+
+## What is the real meaning of DataNode recovery?
+
+DataNode is stateless, but vchannel has states. DataNode's statelessness is guaranteed by DataCoord, which
+means the vchannel's state is maintained by DataCoord. So DataNode recovery is no different from starting.
+
+So what's DataNode's starting procedure?
+
 ## Objectives
-
-DataNode is stateless. It does whatever DataService tells, so recovery is not a difficult thing for datanode.
-Once datanode subscribes certain vchannels, it starts working till crash. So the key to recovery is consuming
-vchannels at the right position. What's processed no longer need to be processed again, what's not processed is
-the key.
-
-What's the line between processed or not for DataNode? Wether the data is flushed into persistent storage, which's
- the only job of DataNode. So recovering a DataNode needs the last positions of flushed data in every vchannels.
-Luckily, this information will be told by DataService, DataNode only worries about updating positions after flushing.
-
-There's more to fully recover a DataNode. DataNode replicates collection schema in memory to decode and encode
-data. Once it recovers to an older position of insert channels, it needs the collection schema snapshots from
-that exactly position. Luckily again, the snapshots will be provided via MasterService.
-
-So DataNode needs to achieve the following 3 objectives.
 
 ### 1. Service Registration
 
-DataNode registers itself to Etcd after grpc server started, in *INITIALIZING* state.
+DataNode registers itself to etcd after grpc server started, in *INITIALIZING* state.
 
-### 2. Service discovery
+### 2. Service Discovery
 
-DataNode discovers DataService and MasterService, in *HEALTHY* state.
+DataNode discovers DataCoord and RootCoord, in *HEALTHY* and *IDLE* state.
 
-### 3. Recovery state
+### 3. Flowgraph Recovery
 
-After stage 1&2, DataNode is healthy but IDLE. DataNode starts to work until the following happens.
+The detailed design can be found at [datanode flowgraph recovery design](datanode_flowgraph_recovery_design_0604_2021.md).
 
-- DataService info the vchannels and positions.
+After DataNode subscribes to a stateful vchannel, DataNode starts to work, or more specifically, flowgraph starts to work.
 
-- DataNode replicates the snapshots of collection schema at the positions to which these vchannel belongs.
+Vchannel is stateful because we don't want to process twice what's already processed, as a "processed" message means its
+already persistent. In DataNode's terminology, a message is processed if it's been flushed.
 
-- DataNode initializes flowgraphs and subscribes to these vchannels
+DataCoord tells DataNode stateful vchannel info through RPC `WatchDmChannels`, so that DataNode won't process
+the same messages over and over again. So flowgraph needs ability to consume messages in the middle of a vchannel.
 
-There're some problems I haven't thought of.
+DataNode tells DataCoord vchannel states after each flush through RPC `SaveBinlogPaths`, so that DataCoord
+keeps the vchannel states update.
 
-- What if DataService is unavaliable, by network failure, DataService crashing, etc.
-- What if MasterService is unavaliable, by network failure, MasterService crashing, etc.
-- What if MinIO is unavaliable, by network failure.
 
-## TODO
+## Some interface/proto designs below are outdated, will be updated soon
 
-### 1. DataNode no longer interacts with Etcd except service registering
+### 1. DataNode no longer interacts with etcd except service registering
 
-#### **O1-1** DataService rather than DataNode saves binlog paths into Etcd
-    
+#### DataCoord rather than DataNode saves binlog paths into etcd
+
    ![datanode_design](graphs/datanode_design_01.jpg)
 
-##### Auto-flush with manul-flush
 
-Manul-flush means that the segment is sealed, and DataNode is told to flush by DataService. The completion of
-manul-flush requires ddl and insert data both flushed, and a flush completed message will be published to
-msgstream by DataService. In this case, not only do binlog paths need to be stored, but also msg-positions.
-
-Auto-flush means that the segment isn't sealed, but the buffer of insert/ddl data in DataNode is full,
-DataNode automatically flushs these data. Those flushed binlogs' paths are buffered in DataNode, waiting for the next
-manul-flush and upload to DataServce together.
-
-##### DataService RPC Design
+##### DataCoord RPC Design
 
 ```proto
 rpc SaveBinlogPaths(SaveBinlogPathsRequest) returns (common.Status){}
@@ -68,49 +65,22 @@ message ID2PathList {
     repeated string Paths = 2;
 }
 
-message SaveBinlogPathsRequest {                                                                                 
-    common.MsgBase base = 1; 
+message CheckPoint {
+    int64 segmentID = 1;
+    internal.MsgPosition position = 2;
+    int64 num_of_rows = 3;
+}
+
+message SaveBinlogPathsRequest {
+    common.MsgBase base = 1;
     int64 segmentID = 2;
     int64 collectionID = 3;
-    ID2PathList field2BinlogPaths = 4;
-    ID2PathList coll2TsBinlogPaths = 5; 
-    ID2PathList coll2DdlBinlogPaths = 6;  
-    repeated internal.MsgPosition start_positions = 7;  
-    repeated internal.MsgPosition end_positions = 8; 
+    repeated ID2PathList field2BinlogPaths = 4;
+    repeated CheckPoint checkPoints = 7;
+    repeated SegmentStartPosition start_positions = 6;
+    bool flushed = 7;
  }
 ```
-
-##### DataService Etcd Binlog Meta Design
-
-The same as DataNode
-
-```proto
-// key: ${prefix}/${segmentID}/${fieldID}/${idx}
-message SegmentFieldBinlogMeta {
-    int64  fieldID = 1;
-    string binlog_path = 2;
-}
-
-// key: ${prefix}/${collectionID}/${idx}
-message DDLBinlogMeta {
-    string ddl_binlog_path = 1;
-    string ts_binlog_path = 2;
-}
-```
-    
-#### **O1-2** DataNode registers itself to Etcd when started
-    
-### 2. DataNode gets start and end MsgPositions of all channels, and report to DataService after flushing
-
-   **O2-1**. Set start and end positions while publishing ddl messages. 0.5 Day
-
-   **O2-2**. [after **O4-1**] Get message positions in flowgraph and pass through nodes, report to DataService along with binlog paths. 1 Day
-
-   **O2-3**. [with **O1-1**] DataNode is no longer aware of whether if segment flushed, so SegmentFlushed messages should be sent by DataService. 1 Day
-
-### 3. DataNode recovery
-
-   **O3-1**. Flowgraph is initialized after DataService called WatchDmChannels, flowgraph is healthy if MasterService is available. 2 Day
 
 ### 4. DataNode with collection with flowgraph with vchannel designs
 
@@ -119,7 +89,61 @@ message DDLBinlogMeta {
 
   ![datanode_design](graphs/collection_flowgraph_1_n.png)
 
-  **O4-1.** DataNode scales flowgraph 2 Day
+**O4-1.** DataNode scales flowgraph 2 Day
+
+Change `WatchDmChannelsRequest` proto.
+
+``` proto
+message VchannelInfo {
+  int64 collectionID = 1;
+  string channelName = 2;
+  internal.MsgPosition seek_position = 3;
+  repeated SegmentInfo unflushedSegments = 4;
+  repeated int64 flushedSegments = 5;
+}
+
+message WatchDmChannelsRequest {
+  common.MsgBase base = 1;
+  repeated VchannelInfo vchannels = 2;
+}
+```
+
+DataNode consists of multiple DataSyncService, each service controls one flowgraph.
+
+```go
+// DataNode
+type DataNode struct {
+    ...
+    vchan2Sync map[string]*dataSyncService
+    vchan2FlushCh map[string]chan<- *flushMsg
+
+    clearSignal chan UniqueID
+    ...
+}
+
+// DataSyncService
+type dataSyncService struct {
+	ctx          context.Context
+	fg           *flowgraph.TimeTickedFlowGraph
+	flushChan    <-chan *flushMsg
+	replica      Replica
+	idAllocator  allocatorInterface
+	msFactory    msgstream.Factory
+	collectionID UniqueID
+}
+```
+
+DataNode Init -> Register to etcd -> Discovery data service -> Discover master service -> IDLE
+
+WatchDmChannels -> new dataSyncService -> HEALTH
+
+`WatchDmChannels:`
+
+1. If `DataNode.vchan2Sync` is empty, DataNode is in IDLE, `WatchDmChannels` will create new dataSyncService for every unique vchannel, then DataNode is in HEALTH.
+2. If vchannel name of `VchannelPair` is not in `DataNode.vchan2Sync`, create a new dataSyncService.
+3. If vchannel name of `VchannelPair` is in `DataNode.vchan2Sync`, ignore.
+
+```
 
 #### The boring design
 
@@ -138,10 +162,3 @@ message DDLBinlogMeta {
 • If collection:flowgraph = n : n  , load balancing on vchannels.
 
 ![datanode_design](graphs/collection_flowgraph_n_n.jpg)
-
-
-
-
-
-
-

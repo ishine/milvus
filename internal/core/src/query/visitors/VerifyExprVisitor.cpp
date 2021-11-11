@@ -13,12 +13,12 @@
 
 namespace milvus::query {
 void
-VerifyExprVisitor::visit(BoolUnaryExpr& expr) {
+VerifyExprVisitor::visit(LogicalUnaryExpr& expr) {
     // TODO
 }
 
 void
-VerifyExprVisitor::visit(BoolBinaryExpr& expr) {
+VerifyExprVisitor::visit(LogicalBinaryExpr& expr) {
     // TODO
 }
 
@@ -28,7 +28,17 @@ VerifyExprVisitor::visit(TermExpr& expr) {
 }
 
 void
-VerifyExprVisitor::visit(RangeExpr& expr) {
+VerifyExprVisitor::visit(UnaryRangeExpr& expr) {
+    // TODO
+}
+
+void
+VerifyExprVisitor::visit(BinaryRangeExpr& expr) {
+    // TODO
+}
+
+void
+VerifyExprVisitor::visit(CompareExpr& expr) {
     // TODO
 }
 

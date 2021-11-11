@@ -12,12 +12,13 @@
 package querynode
 
 import (
-	"encoding/binary"
+	"context"
 	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
@@ -38,11 +39,11 @@ func TestDataSyncService_Start(t *testing.T) {
 	var rawData []byte
 	for _, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele))
+		common.Endian.PutUint32(buf, math.Float32bits(ele))
 		rawData = append(rawData, buf...)
 	}
 	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, 1)
+	common.Endian.PutUint32(bs, 1)
 	rawData = append(rawData, bs...)
 	var records []*commonpb.Blob
 	for i := 0; i < N; i++ {
@@ -64,14 +65,14 @@ func TestDataSyncService_Start(t *testing.T) {
 				Base: &commonpb.MsgBase{
 					MsgType:   commonpb.MsgType_Insert,
 					MsgID:     0,
-					Timestamp: uint64(i + 1000),
+					Timestamp: Timestamp(i + 1000),
 					SourceID:  0,
 				},
 				CollectionID: collectionID,
 				PartitionID:  defaultPartitionID,
-				SegmentID:    int64(0),
-				ChannelID:    "0",
-				Timestamps:   []uint64{uint64(i + 1000), uint64(i + 1000)},
+				SegmentID:    UniqueID(0),
+				ShardName:    "0",
+				Timestamps:   []Timestamp{Timestamp(i + 1000), Timestamp(i + 1000)},
 				RowIDs:       []int64{int64(i), int64(i)},
 				RowData: []*commonpb.Blob{
 					{Value: rawData},
@@ -115,10 +116,137 @@ func TestDataSyncService_Start(t *testing.T) {
 	err := msFactory.SetParams(m)
 	assert.Nil(t, err)
 
-	// dataSync
-	node.dataSyncServices[collectionID] = newDataSyncService(node.queryNodeLoopCtx, node.replica, msFactory, collectionID)
-	go node.dataSyncServices[collectionID].start()
+	channels := []Channel{"0"}
+	node.dataSyncService.addCollectionFlowGraph(collectionID, channels)
+	err = node.dataSyncService.startCollectionFlowGraph(collectionID, channels)
+	assert.NoError(t, err)
 
 	<-node.queryNodeLoopCtx.Done()
-	node.Stop()
+	node.dataSyncService.close()
+
+	err = node.Stop()
+	assert.NoError(t, err)
+}
+
+func TestDataSyncService_collectionFlowGraphs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streaming, err := genSimpleReplica()
+	assert.NoError(t, err)
+
+	historicalReplica, err := genSimpleReplica()
+	assert.NoError(t, err)
+
+	fac, err := genFactory()
+	assert.NoError(t, err)
+
+	tSafe := newTSafeReplica()
+	dataSyncService := newDataSyncService(ctx, streaming, historicalReplica, tSafe, fac)
+	assert.NotNil(t, dataSyncService)
+
+	dataSyncService.addCollectionFlowGraph(defaultCollectionID, []Channel{defaultVChannel})
+
+	fg, err := dataSyncService.getCollectionFlowGraphs(defaultCollectionID, []Channel{defaultVChannel})
+	assert.NotNil(t, fg)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(fg))
+
+	fg, err = dataSyncService.getCollectionFlowGraphs(UniqueID(1000), []Channel{defaultVChannel})
+	assert.Nil(t, fg)
+	assert.Error(t, err)
+
+	fg, err = dataSyncService.getCollectionFlowGraphs(defaultCollectionID, []Channel{"invalid-vChannel"})
+	assert.NotNil(t, fg)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(fg))
+
+	fg, err = dataSyncService.getCollectionFlowGraphs(UniqueID(1000), []Channel{"invalid-vChannel"})
+	assert.Nil(t, fg)
+	assert.Error(t, err)
+
+	err = dataSyncService.startCollectionFlowGraph(defaultCollectionID, []Channel{defaultVChannel})
+	assert.NoError(t, err)
+
+	dataSyncService.removeCollectionFlowGraph(defaultCollectionID)
+
+	fg, err = dataSyncService.getCollectionFlowGraphs(defaultCollectionID, []Channel{defaultVChannel})
+	assert.Nil(t, fg)
+	assert.Error(t, err)
+}
+
+func TestDataSyncService_partitionFlowGraphs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	streaming, err := genSimpleReplica()
+	assert.NoError(t, err)
+
+	historicalReplica, err := genSimpleReplica()
+	assert.NoError(t, err)
+
+	fac, err := genFactory()
+	assert.NoError(t, err)
+
+	tSafe := newTSafeReplica()
+
+	dataSyncService := newDataSyncService(ctx, streaming, historicalReplica, tSafe, fac)
+	assert.NotNil(t, dataSyncService)
+
+	dataSyncService.addPartitionFlowGraph(defaultPartitionID, defaultPartitionID, []Channel{defaultVChannel})
+
+	fg, err := dataSyncService.getPartitionFlowGraphs(defaultPartitionID, []Channel{defaultVChannel})
+	assert.NotNil(t, fg)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(fg))
+
+	fg, err = dataSyncService.getPartitionFlowGraphs(UniqueID(1000), []Channel{defaultVChannel})
+	assert.Nil(t, fg)
+	assert.Error(t, err)
+
+	fg, err = dataSyncService.getPartitionFlowGraphs(defaultPartitionID, []Channel{"invalid-vChannel"})
+	assert.NotNil(t, fg)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(fg))
+
+	fg, err = dataSyncService.getPartitionFlowGraphs(UniqueID(1000), []Channel{"invalid-vChannel"})
+	assert.Nil(t, fg)
+	assert.Error(t, err)
+
+	err = dataSyncService.startPartitionFlowGraph(defaultPartitionID, []Channel{defaultVChannel})
+	assert.NoError(t, err)
+
+	dataSyncService.removePartitionFlowGraph(defaultPartitionID)
+
+	fg, err = dataSyncService.getPartitionFlowGraphs(defaultPartitionID, []Channel{defaultVChannel})
+	assert.Nil(t, fg)
+	assert.Error(t, err)
+}
+
+func TestDataSyncService_removePartitionFlowGraphs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Run("test no tSafe", func(t *testing.T) {
+		streaming, err := genSimpleReplica()
+		assert.NoError(t, err)
+
+		historicalReplica, err := genSimpleReplica()
+		assert.NoError(t, err)
+
+		fac, err := genFactory()
+		assert.NoError(t, err)
+
+		tSafe := newTSafeReplica()
+		tSafe.addTSafe(defaultVChannel)
+
+		dataSyncService := newDataSyncService(ctx, streaming, historicalReplica, tSafe, fac)
+		assert.NotNil(t, dataSyncService)
+
+		dataSyncService.addPartitionFlowGraph(defaultPartitionID, defaultPartitionID, []Channel{defaultVChannel})
+
+		err = dataSyncService.tSafeReplica.removeTSafe(defaultVChannel)
+		assert.NoError(t, err)
+		dataSyncService.removePartitionFlowGraph(defaultPartitionID)
+	})
 }

@@ -12,40 +12,81 @@
 package retry
 
 import (
-	"log"
+	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
-// Reference: https://blog.cyeam.com/golang/2018/08/27/retry
+// Do will run function with retry mechanism.
+// fn is the func to run.
+// Option can control the retry times and timeout.
+func Do(ctx context.Context, fn func() error, opts ...Option) error {
 
-func Impl(attempts int, sleep time.Duration, fn func() error, maxSleepTime time.Duration) error {
-	if err := fn(); err != nil {
-		if s, ok := err.(InterruptError); ok {
-			return s.error
-		}
+	c := newDefaultConfig()
 
-		if attempts--; attempts > 0 {
-			log.Printf("retry func error: %s. attempts #%d after %s.", err.Error(), attempts, sleep)
-			time.Sleep(sleep)
-			if sleep < maxSleepTime {
-				return Impl(attempts, 2*sleep, fn, maxSleepTime)
-			}
-			return Impl(attempts, maxSleepTime, fn, maxSleepTime)
-		}
-		return err
+	for _, opt := range opts {
+		opt(c)
 	}
-	return nil
+	el := make(ErrorList, 0)
+
+	for i := uint(0); i < c.attempts; i++ {
+		if err := fn(); err != nil {
+
+			el = append(el, err)
+
+			if ok := IsUncoverable(err); ok {
+				return el
+			}
+
+			select {
+			case <-time.After(c.sleep):
+			case <-ctx.Done():
+				el = append(el, ctx.Err())
+				return el
+			}
+
+			c.sleep *= 2
+			if c.sleep > c.maxSleepTime {
+				c.sleep = c.maxSleepTime
+			}
+		} else {
+			return nil
+		}
+	}
+	return el
 }
 
-func Retry(attempts int, sleep time.Duration, fn func() error) error {
-	maxSleepTime := time.Millisecond * 1000
-	return Impl(attempts, sleep, fn, maxSleepTime)
+// ErrorList for print error log
+type ErrorList []error
+
+// TODO shouldn't print all retries, might be too much
+// Error method return an string representation of retry error list.
+func (el ErrorList) Error() string {
+	var builder strings.Builder
+	builder.WriteString("All attempts results:\n")
+	for index, err := range el {
+		// if early termination happens
+		if err == nil {
+			break
+		}
+		builder.WriteString(fmt.Sprintf("attempt #%d:%s\n", index+1, err.Error()))
+	}
+	return builder.String()
 }
 
-type InterruptError struct {
+type unrecoverableError struct {
 	error
 }
 
-func NoRetryError(err error) InterruptError {
-	return InterruptError{err}
+// Unrecoverable method wrap an error to unrecoverableError. This will make retry
+// quick return.
+func Unrecoverable(err error) error {
+	return unrecoverableError{err}
+}
+
+// IsUncoverable is used to judge whether the error is wrapped by unrecoverableError.
+func IsUncoverable(err error) bool {
+	_, isUnrecoverable := err.(unrecoverableError)
+	return isUnrecoverable
 }

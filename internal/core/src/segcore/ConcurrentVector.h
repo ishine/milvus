@@ -10,20 +10,22 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #pragma once
-#include <tbb/concurrent_vector.h>
 
 #include <atomic>
 #include <cassert>
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
-#include <vector>
 #include <utility>
-#include "exceptions/EasyAssert.h"
-#include "utils/tools.h"
+#include <vector>
+
 #include <boost/container/vector.hpp>
+#include <tbb/concurrent_vector.h>
+
 #include "common/Types.h"
 #include "common/Span.h"
+#include "exceptions/EasyAssert.h"
+#include "utils/Utils.h"
 
 namespace milvus::segcore {
 
@@ -113,7 +115,7 @@ class ConcurrentVectorImpl : public VectorBase {
  public:
     explicit ConcurrentVectorImpl(ssize_t dim, int64_t size_per_chunk)
         : VectorBase(size_per_chunk), Dim(is_scalar ? 1 : dim) {
-        Assert(is_scalar ? dim == 1 : dim != 1);
+        // Assert(is_scalar ? dim == 1 : dim != 1);
     }
 
     void

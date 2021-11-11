@@ -23,10 +23,11 @@ set(SEGCORE_FILES
         plan_c.cpp
         reduce_c.cpp
         load_index_c.cpp
-        SealedIndexingRecord.cpp
         SegmentInterface.cpp
         SegcoreConfig.cpp
         segcore_init_c.cpp
+        ScalarIndex.cpp
+        TimestampIndex.cpp
         )
 add_library(milvus_segcore SHARED
         ${SEGCORE_FILES}
@@ -34,9 +35,10 @@ add_library(milvus_segcore SHARED
 
 target_link_libraries(milvus_segcore
         tbb milvus_utils pthread knowhere log milvus_proto ${OpenMP_CXX_FLAGS}
-        dl backtrace
+        dl
         milvus_common
         milvus_query
         milvus_utils
+        milvus_config
         )
 

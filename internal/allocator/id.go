@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package allocator
 
@@ -18,25 +23,29 @@ import (
 
 	"go.uber.org/zap"
 
-	msc "github.com/milvus-io/milvus/internal/distributed/masterservice/client"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
-	"github.com/milvus-io/milvus/internal/proto/masterpb"
-	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/proto/rootcoordpb"
 	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
 const (
-	IDCountPerRPC = 200000
+	idCountPerRPC = 200000
 )
 
+// UniqueID is alias of typeutil.UniqueID
 type UniqueID = typeutil.UniqueID
 
+type idAllocatorInterface interface {
+	AllocID(ctx context.Context, req *rootcoordpb.AllocIDRequest) (*rootcoordpb.AllocIDResponse, error)
+}
+
+// IDAllocator allocates Unique and monotonically increasing IDs from Root Coord.
+// It could also batch allocate for less root coord server access
 type IDAllocator struct {
 	Allocator
 
-	masterAddress string
-	masterClient  types.MasterService
+	idAllocator idAllocatorInterface
 
 	countPerRPC uint32
 
@@ -46,8 +55,8 @@ type IDAllocator struct {
 	PeerID UniqueID
 }
 
-func NewIDAllocator(ctx context.Context, masterAddr string) (*IDAllocator, error) {
-
+// NewIDAllocator creates an ID Allocator allocate Unique and monotonically increasing IDs from Root Coord.
+func NewIDAllocator(ctx context.Context, idAlloctor idAllocatorInterface, peerID UniqueID) (*IDAllocator, error) {
 	ctx1, cancel := context.WithCancel(ctx)
 	a := &IDAllocator{
 		Allocator: Allocator{
@@ -55,8 +64,9 @@ func NewIDAllocator(ctx context.Context, masterAddr string) (*IDAllocator, error
 			CancelFunc: cancel,
 			Role:       "IDAllocator",
 		},
-		countPerRPC:   IDCountPerRPC,
-		masterAddress: masterAddr,
+		countPerRPC: idCountPerRPC,
+		idAllocator: idAlloctor,
+		PeerID:      peerID,
 	}
 	a.TChan = &EmptyTicker{}
 	a.Allocator.SyncFunc = a.syncID
@@ -67,20 +77,8 @@ func NewIDAllocator(ctx context.Context, masterAddr string) (*IDAllocator, error
 	return a, nil
 }
 
+// Start creates some working goroutines of IDAllocator.
 func (ia *IDAllocator) Start() error {
-	var err error
-	ia.masterClient, err = msc.NewClient(ia.masterAddress, 20*time.Second)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = ia.masterClient.Init(); err != nil {
-		panic(err)
-	}
-
-	if err = ia.masterClient.Start(); err != nil {
-		panic(err)
-	}
 	return ia.Allocator.Start()
 }
 
@@ -101,7 +99,7 @@ func (ia *IDAllocator) syncID() (bool, error) {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	req := &masterpb.AllocIDRequest{
+	req := &rootcoordpb.AllocIDRequest{
 		Base: &commonpb.MsgBase{
 			MsgType:   commonpb.MsgType_RequestID,
 			MsgID:     0,
@@ -110,7 +108,7 @@ func (ia *IDAllocator) syncID() (bool, error) {
 		},
 		Count: need,
 	}
-	resp, err := ia.masterClient.AllocID(ctx, req)
+	resp, err := ia.idAllocator.AllocID(ctx, req)
 
 	cancel()
 	if err != nil {
@@ -149,10 +147,11 @@ func (ia *IDAllocator) pickCanDoFunc() {
 func (ia *IDAllocator) processFunc(req Request) error {
 	idRequest := req.(*IDRequest)
 	idRequest.id = ia.idStart
-	ia.idStart++
+	ia.idStart += int64(idRequest.count)
 	return nil
 }
 
+// AllocOne allocates one id.
 func (ia *IDAllocator) AllocOne() (UniqueID, error) {
 	ret, _, err := ia.Alloc(1)
 	if err != nil {
@@ -161,6 +160,7 @@ func (ia *IDAllocator) AllocOne() (UniqueID, error) {
 	return ret, nil
 }
 
+// Alloc allocates the id of the count number.
 func (ia *IDAllocator) Alloc(count uint32) (UniqueID, UniqueID, error) {
 	req := &IDRequest{BaseRequest: BaseRequest{Done: make(chan error), Valid: false}}
 

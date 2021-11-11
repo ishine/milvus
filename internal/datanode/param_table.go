@@ -1,182 +1,178 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package datanode
 
 import (
-	"os"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
-	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable in DataNode contains all configs for DataNode
 type ParamTable struct {
 	paramtable.BaseTable
 
-	// === DataNode Internal Components Configs ===
-	NodeID                  UniqueID
-	IP                      string
+	// ID of the current DataNode
+	NodeID UniqueID
+
+	// IP of the current DataNode
+	IP string
+
+	// Port of the current DataNode
 	Port                    int
 	FlowGraphMaxQueueLength int32
 	FlowGraphMaxParallelism int32
-	FlushInsertBufferSize   int32
+	FlushInsertBufferSize   int64
 	InsertBinlogRootPath    string
-	DdlBinlogRootPath       string
 	StatsBinlogRootPath     string
-	Log                     log.Config
+	DeleteBinlogRootPath    string
+	Alias                   string // Different datanode in one machine
 
-	// === DataNode External Components Configs ===
-	// --- Pulsar ---
+	// Channel Name
+	DmlChannelName   string
+	DeltaChannelName string
+
+	// Pulsar address
 	PulsarAddress string
 
-	// - insert channel -
-	InsertChannelNames []string
+	// Rocksmq path
+	RocksmqPath string
 
-	// - dd channel -
-	DDChannelNames []string
+	// Cluster channels
+	ClusterChannelPrefix string
 
-	// - seg statistics channel -
+	// Segment statistics channel
 	SegmentStatisticsChannelName string
 
-	// - timetick channel -
+	// Timetick channel
 	TimeTickChannelName string
 
-	// - complete flush channel -
-	CompleteFlushChannelName string
-
-	// - channel subname -
+	// Channel subscribition name -
 	MsgChannelSubName string
 
 	// --- ETCD ---
-	EtcdAddress         string
+	EtcdEndpoints       []string
 	MetaRootPath        string
-	SegFlushMetaSubPath string // GOOSE TODO remove
-	DDLFlushMetaSubPath string // GOOSE TODO remove
+	ChannelWatchSubPath string
 
-	// --- MinIO ---
+	// MinIO
+
 	MinioAddress         string
 	MinioAccessKeyID     string
 	MinioSecretAccessKey string
 	MinioUseSSL          bool
 	MinioBucketName      string
+
+	CreatedTime time.Time
+	UpdatedTime time.Time
 }
 
+// Params is global var in DataNode
 var Params ParamTable
 var once sync.Once
 
-func (p *ParamTable) Init() {
+// InitAlias init this DataNode alias
+func (p *ParamTable) InitAlias(alias string) {
+	p.Alias = alias
+}
+
+// InitOnce call params Init only once
+func (p *ParamTable) InitOnce() {
 	once.Do(func() {
-		p.BaseTable.Init()
-		err := p.LoadYaml("advanced/data_node.yaml")
-		if err != nil {
-			panic(err)
-		}
-
-		// === DataNode Internal Components Configs ===
-		p.initNodeID()
-		p.initFlowGraphMaxQueueLength()
-		p.initFlowGraphMaxParallelism()
-		p.initFlushInsertBufferSize()
-		p.initInsertBinlogRootPath()
-		p.initDdlBinlogRootPath()
-		p.initStatsBinlogRootPath()
-		p.initLogCfg()
-
-		// === DataNode External Components Configs ===
-		// --- Pulsar ---
-		p.initPulsarAddress()
-
-		// - insert channel -
-		p.initInsertChannelNames()
-
-		// - dd channel -
-		p.initDDChannelNames()
-
-		// - channel subname -
-		p.initMsgChannelSubName()
-
-		// --- ETCD ---
-		p.initEtcdAddress()
-		p.initMetaRootPath()
-		p.initSegFlushMetaSubPath() // GOOSE TODO remove
-		p.initDDLFlushMetaSubPath() // GOOSE TODO remove
-
-		// --- MinIO ---
-		p.initMinioAddress()
-		p.initMinioAccessKeyID()
-		p.initMinioSecretAccessKey()
-		p.initMinioUseSSL()
-		p.initMinioBucketName()
+		p.Init()
 	})
 }
 
-// ==== DataNode internal components configs ====
-func (p *ParamTable) initNodeID() {
-	dataNodeIDStr := os.Getenv("DATA_NODE_ID")
-	if dataNodeIDStr == "" {
-		dataNodeIDStr = "1"
-	}
+// Init initializes DataNode configs
+func (p *ParamTable) Init() {
+	p.BaseTable.Init()
 
-	dnID, err := strconv.Atoi(dataNodeIDStr)
-	if err != nil {
-		panic(err)
-	}
+	p.initFlowGraphMaxQueueLength()
+	p.initFlowGraphMaxParallelism()
+	p.initFlushInsertBufferSize()
+	p.initInsertBinlogRootPath()
+	p.initStatsBinlogRootPath()
+	p.initDeleteBinlogRootPath()
 
-	p.NodeID = UniqueID(dnID)
+	p.initPulsarAddress()
+	p.initRocksmqPath()
+
+	// Must init global msgchannel prefix before other channel names
+	p.initClusterMsgChannelPrefix()
+	p.initSegmentStatisticsChannelName()
+	p.initTimeTickChannelName()
+
+	p.initEtcdEndpoints()
+	p.initMetaRootPath()
+	p.initChannelWatchPath()
+
+	p.initMinioAddress()
+	p.initMinioAccessKeyID()
+	p.initMinioSecretAccessKey()
+	p.initMinioUseSSL()
+	p.initMinioBucketName()
+
+	p.initDmlChannelName()
+	p.initDeltaChannelName()
+
+	p.initRoleName()
 }
 
-// ---- flowgraph configs ----
 func (p *ParamTable) initFlowGraphMaxQueueLength() {
-	p.FlowGraphMaxQueueLength = p.ParseInt32("dataNode.dataSync.flowGraph.maxQueueLength")
+	p.FlowGraphMaxQueueLength = p.ParseInt32WithDefault("dataNode.dataSync.flowGraph.maxQueueLength", 1024)
 }
 
 func (p *ParamTable) initFlowGraphMaxParallelism() {
-	p.FlowGraphMaxParallelism = p.ParseInt32("dataNode.dataSync.flowGraph.maxParallelism")
+	p.FlowGraphMaxParallelism = p.ParseInt32WithDefault("dataNode.dataSync.flowGraph.maxParallelism", 1024)
 }
 
-// ---- flush configs ----
 func (p *ParamTable) initFlushInsertBufferSize() {
-	p.FlushInsertBufferSize = p.ParseInt32("datanode.flush.insertBufSize")
+	p.FlushInsertBufferSize = p.ParseInt64("_DATANODE_INSERTBUFSIZE")
 }
 
 func (p *ParamTable) initInsertBinlogRootPath() {
 	// GOOSE TODO: rootPath change to  TenentID
-	rootPath, err := p.Load("etcd.rootPath")
+	rootPath, err := p.Load("minio.rootPath")
 	if err != nil {
 		panic(err)
 	}
 	p.InsertBinlogRootPath = path.Join(rootPath, "insert_log")
 }
 
-func (p *ParamTable) initDdlBinlogRootPath() {
-	// GOOSE TODO: rootPath change to  TenentID
-	rootPath, err := p.Load("etcd.rootPath")
-	if err != nil {
-		panic(err)
-	}
-	p.DdlBinlogRootPath = path.Join(rootPath, "data_definition_log")
-}
-
 func (p *ParamTable) initStatsBinlogRootPath() {
-	rootPath, err := p.Load("etcd.rootPath")
+	rootPath, err := p.Load("minio.rootPath")
 	if err != nil {
 		panic(err)
 	}
 	p.StatsBinlogRootPath = path.Join(rootPath, "stats_log")
 }
 
-// ---- Pulsar ----
+func (p *ParamTable) initDeleteBinlogRootPath() {
+	rootPath, err := p.Load("minio.rootPath")
+	if err != nil {
+		panic(err)
+	}
+	p.DeleteBinlogRootPath = path.Join(rootPath, "delta_log")
+}
+
 func (p *ParamTable) initPulsarAddress() {
 	url, err := p.Load("_PulsarAddress")
 	if err != nil {
@@ -185,31 +181,55 @@ func (p *ParamTable) initPulsarAddress() {
 	p.PulsarAddress = url
 }
 
-// - insert channel -
-func (p *ParamTable) initInsertChannelNames() {
-	p.InsertChannelNames = make([]string, 0)
+func (p *ParamTable) initRocksmqPath() {
+	path, err := p.Load("_RocksmqPath")
+	if err != nil {
+		panic(err)
+	}
+	p.RocksmqPath = path
 }
 
-func (p *ParamTable) initDDChannelNames() {
-	p.DDChannelNames = make([]string, 0)
+func (p *ParamTable) initClusterMsgChannelPrefix() {
+	name, err := p.Load("msgChannel.chanNamePrefix.cluster")
+	if err != nil {
+		panic(err)
+	}
+	p.ClusterChannelPrefix = name
 }
 
-// - msg channel subname -
+func (p *ParamTable) initSegmentStatisticsChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.dataCoordStatistic")
+	if err != nil {
+		panic(err)
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.SegmentStatisticsChannelName = strings.Join(s, "-")
+}
+
+func (p *ParamTable) initTimeTickChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.dataCoordTimeTick")
+	if err != nil {
+		panic(err)
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.TimeTickChannelName = strings.Join(s, "-")
+}
+
 func (p *ParamTable) initMsgChannelSubName() {
-	name, err := p.Load("msgChannel.subNamePrefix.dataNodeSubNamePrefix")
+	config, err := p.Load("msgChannel.subNamePrefix.dataNodeSubNamePrefix")
 	if err != nil {
 		panic(err)
 	}
-	p.MsgChannelSubName = name + "-" + strconv.FormatInt(p.NodeID, 10)
+	s := []string{p.ClusterChannelPrefix, config, strconv.FormatInt(p.NodeID, 10)}
+	p.MsgChannelSubName = strings.Join(s, "-")
 }
 
-// --- ETCD ---
-func (p *ParamTable) initEtcdAddress() {
-	addr, err := p.Load("_EtcdAddress")
+func (p *ParamTable) initEtcdEndpoints() {
+	endpoints, err := p.Load("_EtcdEndpoints")
 	if err != nil {
 		panic(err)
 	}
-	p.EtcdAddress = addr
+	p.EtcdEndpoints = strings.Split(endpoints, ",")
 }
 
 func (p *ParamTable) initMetaRootPath() {
@@ -224,24 +244,11 @@ func (p *ParamTable) initMetaRootPath() {
 	p.MetaRootPath = path.Join(rootPath, subPath)
 }
 
-// GOOSE TODO remove
-func (p *ParamTable) initSegFlushMetaSubPath() {
-	subPath, err := p.Load("etcd.segFlushMetaSubPath")
-	if err != nil {
-		panic(err)
-	}
-	p.SegFlushMetaSubPath = subPath
+func (p *ParamTable) initChannelWatchPath() {
+	p.ChannelWatchSubPath = "channelwatch"
 }
 
-// GOOSE TODO remove
-func (p *ParamTable) initDDLFlushMetaSubPath() {
-	subPath, err := p.Load("etcd.ddlFlushMetaSubPath")
-	if err != nil {
-		panic(err)
-	}
-	p.DDLFlushMetaSubPath = subPath
-}
-
+// --- MinIO ---
 func (p *ParamTable) initMinioAddress() {
 	endpoint, err := p.Load("_MinioAddress")
 	if err != nil {
@@ -251,7 +258,7 @@ func (p *ParamTable) initMinioAddress() {
 }
 
 func (p *ParamTable) initMinioAccessKeyID() {
-	keyID, err := p.Load("minio.accessKeyID")
+	keyID, err := p.Load("_MinioAccessKeyID")
 	if err != nil {
 		panic(err)
 	}
@@ -259,7 +266,7 @@ func (p *ParamTable) initMinioAccessKeyID() {
 }
 
 func (p *ParamTable) initMinioSecretAccessKey() {
-	key, err := p.Load("minio.secretAccessKey")
+	key, err := p.Load("_MinioSecretAccessKey")
 	if err != nil {
 		panic(err)
 	}
@@ -267,7 +274,7 @@ func (p *ParamTable) initMinioSecretAccessKey() {
 }
 
 func (p *ParamTable) initMinioUseSSL() {
-	usessl, err := p.Load("minio.useSSL")
+	usessl, err := p.Load("_MinioUseSSL")
 	if err != nil {
 		panic(err)
 	}
@@ -275,44 +282,31 @@ func (p *ParamTable) initMinioUseSSL() {
 }
 
 func (p *ParamTable) initMinioBucketName() {
-	bucketName, err := p.Load("minio.bucketName")
+	bucketName, err := p.Load("_MinioBucketName")
 	if err != nil {
 		panic(err)
 	}
 	p.MinioBucketName = bucketName
 }
 
-func (p *ParamTable) initLogCfg() {
-	p.Log = log.Config{}
-	format, err := p.Load("log.format")
+func (p *ParamTable) initRoleName() {
+	p.RoleName = "datanode"
+}
+
+func (p *ParamTable) initDmlChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.rootCoordDml")
 	if err != nil {
 		panic(err)
 	}
-	p.Log.Format = format
-	level, err := p.Load("log.level")
+	s := []string{p.ClusterChannelPrefix, config}
+	p.DmlChannelName = strings.Join(s, "-")
+}
+
+func (p *ParamTable) initDeltaChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.rootCoordDelta")
 	if err != nil {
-		panic(err)
+		config = "rootcoord-delta"
 	}
-	p.Log.Level = level
-	devStr, err := p.Load("log.dev")
-	if err != nil {
-		panic(err)
-	}
-	dev, err := strconv.ParseBool(devStr)
-	if err != nil {
-		panic(err)
-	}
-	p.Log.Development = dev
-	p.Log.File.MaxSize = p.ParseInt("log.file.maxSize")
-	p.Log.File.MaxBackups = p.ParseInt("log.file.maxBackups")
-	p.Log.File.MaxDays = p.ParseInt("log.file.maxAge")
-	rootPath, err := p.Load("log.file.rootPath")
-	if err != nil {
-		panic(err)
-	}
-	if len(rootPath) != 0 {
-		p.Log.File.Filename = path.Join(rootPath, "datanode-"+strconv.FormatInt(p.NodeID, 10)+".log")
-	} else {
-		p.Log.File.Filename = ""
-	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.DeltaChannelName = strings.Join(s, "-")
 }

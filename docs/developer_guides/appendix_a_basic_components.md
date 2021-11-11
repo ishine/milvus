@@ -1,10 +1,8 @@
-
-
 ## Appendix A. Basic Components
 
 #### A.1 System Component
 
-Milvus has 9 different components, and can be abstracted into basic Component.
+Milvus has 9 different components and can be abstracted into basic Components.
 
 ```go
 type Component interface {
@@ -13,10 +11,11 @@ type Component interface {
 	Stop() error
 	GetComponentStates(ctx context.Context) (*internalpb.ComponentStates, error)
 	GetStatisticsChannel(ctx context.Context) (*milvuspb.StringResponse, error)
+	Register() error
 }
 ```
 
-* *GetComponentStates*
+- _GetComponentStates_
 
 ```go
 
@@ -43,8 +42,7 @@ type ComponentStates struct {
 
 ```
 
-If a component needs to process timetick message to align timetick, it needs to implement TimeTickProvider interface.
-
+If a component needs to process timetick message to align timetick, it needs to implement the TimeTickProvider interface.
 
 ```go
 type TimeTickProvider interface {
@@ -52,111 +50,86 @@ type TimeTickProvider interface {
 }
 ```
 
-
 #### A.2 Session
+
 ###### ServerID
 
-The ID is stored in a key-value pair on etcd. The key is metaRootPath + "/services/ServerID". The initial value is 0. When a service is registered, it is incremented by 1 and returned to the next registered service.
+The ID is stored in a key-value pair on etcd. The key is metaRootPath + "/session/id". The initial value is 0. When a service is registered, it is incremented by 1 and returned to the next registered service.
 
-###### Registeration
+###### Registration
 
-* Registration is achieved through etcd's lease mechanism.
+- Registration is achieved through etcd's lease mechanism.
 
-* The service creates a lease with etcd and stores a key-value pair in etcd. If the lease expires or the service goes offline, etcd will delete the key-value pair. You can judge whether this service is avaliable through the key.
+- The service creates a lease with etcd and stores a key-value pair in etcd. If the lease expires or the service goes offline, etcd will delete the key-value pair. You can judge whether this service is available through the key.
 
-* key: metaRootPath + "/services" + "/ServerName(-ServerID)(optional)"
+- key: metaRoot + "/session" + "/ServerName(-ServerID)(optional)"
 
-* value: json format
+- value: json format
 
   ```json
   {
     "ServerID": "ServerID",
     "ServerName": "ServerName",
     "Address": "ip:port",
-    "LeaseID": "LeaseID",
+    "Exclusive": "Exclusive"
   }
   ```
 
-* By obtaining the address, you can establish a connection with other services
+- By obtaining the address, you can establish a connection with other services
 
-* If a service is exclusive, the key will not have **ServerID**. But **ServerID** still will be stored in value. 
+- If a service is exclusive, the key will not have **ServerID**. But **ServerID** still will be stored in value.
 
 ###### Discovery
 
-* All currently available services can be obtained by obtaining all the key-value pairs deposited during registration. If you want to get all the available nodes for a certain type of service, you can pass in the prefix of the corresponding key
+- All currently available services can be obtained by obtaining all the key-value pairs deposited during registration. If you want to get all the available nodes for a certain type of service, you can pass in the prefix of the corresponding key
 
-* Registeration time can be compared with ServerID for ServerID will increase according to time.
-
+- Registration time can be compared with ServerID for ServerID will increase according to time.
 
 ###### Interface
 
-```go
-const defaultIDKey = "services/id"
-const defaultRetryTimes = 30
+````go
+const (
+	DefaultServiceRoot = "session/"
+	DefaultIDKey       = "id"
+	DefaultRetryTimes  = 30
+	DefaultTTL         = 60
+)
 
 // Session is a struct to store service's session, including ServerID, ServerName,
 // Address.
-// LeaseID will be assigned after registered in etcd.
+// Exclusive indicates that this server can only start one.
 type Session struct {
-    ServerID   int64
-    ServerName string
-    Address    string
-    LeaseID    clientv3.LeaseID
+	ctx        context.Context
+	ServerID   int64  `json:"ServerID,omitempty"`
+	ServerName string `json:"ServerName,omitempty"`
+	Address    string `json:"Address,omitempty"`
+	Exclusive  bool   `json:"Exclusive,omitempty"`
 }
 
-var (
-	globalServerID = int64(-1)
-)
+// NewSession is a helper to build Session object.
+// ServerID, ServerName, Address, Exclusive will be assigned after registeration.
+// metaRoot is a path in etcd to save session information.
+// etcdEndpoints is to init etcdCli when NewSession
+func NewSession(ctx context.Context, metaRoot string, etcdEndpoints []string) *Session {}
 
-// NewSession is a helper to build Session object.LeaseID will be assigned after
-// registeration.
-func NewSession(serverID int64, serverName, address string) *Session {}
+// Init will initialize base struct of the Session, including ServerName, ServerID,
+// Address, Exclusive. ServerID is obtained in getServerID.
+// Finally it will process keepAliveResponse to keep alive with etcd.
+func (s *Session) Init(serverName, address string, exclusive bool) <-chan bool {}
 
-// GlobalServerID returns [singleton] ServerID.
-// Before SetGlobalServerID, GlobalServerID() returns -1
-func GlobalServerID() int64 {}
+// GetSessions will get all sessions registered in etcd.
+// Revision is returned for WatchServices to prevent key events from being missed.
+func (s *Session) GetSessions(prefix string) (map[string]*Session, int64, error) {}
 
-// SetGlobalServerID sets the [singleton] ServerID. ServerID returned by
-// GlobalServerID(). Those who use GlobalServerID should call SetGlobalServerID()
-// as early as possible in main() before use ServerID.
-func SetGlobalServerID(id int64) {}
-
-// GetServerID gets id from etcd with key: metaRootPath + "/services/id"
-// Each server get ServerID and add one to id.
-func GetServerID(etcd *etcdkv.EtcdKV) (int64, error) {}
-
-// RegisterService registers the service to etcd so that other services
-// can find that the service is online and issue subsequent operations
-// RegisterService will save a key-value in etcd
-// key: metaRootPath + "/services/" + "ServerName(-ServerID)(optional)"
-// value: json format
-// {
-//     "ServerID": "ServerID",
-//     "ServerName": "ServerName",
-//     "Address": "ip:port",
-//     "LeaseID": "LeaseID",
-// }
-// MetaRootPath is configurable in the config file.
-// Exclusive means whether this service can exist two at the same time, if so,
-// it is false. Otherwise, set it to true and the key will not have ServerID.
-// But ServerID still will be stored in value.
-func RegisterService(etcdKV *etcdkv.EtcdKV, session *Session, ttl int64) (<-chan *clientv3.LeaseKeepAliveResponse, error) {}
-
-// ProcessKeepAliveResponse processes the response of etcd keepAlive interface
-// If keepAlive fails for unexpected error, it will retry for default_retry_times times
-func ProcessKeepAliveResponse(ctx context.Context, ch <-chan *clientv3.LeaseKeepAliveResponse) (signal <-chan bool) {}
-
-
-// GetAllSessions gets all the services registered in etcd.
-// This gets all the key with prefix metaRootPath + "/services/" + prefix
-// For general, "datanode" to get all datanodes
-func GetSessions(etcdKV *etcdkv.EtcdKV, prefix string) ([]*Session, error) {}
-
-// WatchServices watch all events in etcd.
-// If a server register, a session will be sent to addChannel
-// If a server offline, a session will be sent to deleteChannel
-func WatchServices(ctx context.Context, etcdKV *etcdkv.EtcdKV, prefix string) (addChannel <-chan *Session, deleteChannel <-chan *Session) {}
-```
+// WatchServices watch the service's up and down in etcd, and send event to
+// eventChannel.
+// prefix is a parameter to know which service to watch and can be obtained in
+// typeutil.type.go.
+// revision is an etcd reversion to prevent missing key events and can be obtained
+// in GetSessions.
+// If a server up, an event will be added to channel with eventType SessionAddType.
+// If a server down, an event will be added to channel with eventType SessionDelType.
+func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-chan *SessionEvent) {}
 
 
 #### A.3 Global Parameter Table
@@ -181,10 +154,9 @@ func (gp *BaseTable) WriteNodeIDList() []UniqueID
 func (gp *BaseTable) DataNodeIDList() []UniqueID
 func (gp *BaseTable) ProxyIDList() []UniqueID
 func (gp *BaseTable) QueryNodeIDList() []UniqueID
-```
+````
 
-
-* *LoadYaml(filePath string)* turns a YAML file into multiple key-value pairs. For example, given the following YAML
+- _LoadYaml(filePath string)_ turns a YAML file into multiple key-value pairs. For example, given the following YAML
 
 ```yaml
 etcd:
@@ -193,7 +165,7 @@ etcd:
   rootpath: milvus/etcd
 ```
 
-*BaseTable.LoadYaml* will insert three key-value pairs into *params*
+_BaseTable.LoadYaml_ will insert three key-value pairs into _params_
 
 ```go
 	"etcd.address" -> "localhost"
@@ -201,11 +173,10 @@ etcd:
 	"etcd.rootpath" -> "milvus/etcd"
 ```
 
-
-
 #### A.4 Time Ticked Flow Graph
 
 //TODO remove?
+
 ###### A.4.1 Flow Graph States
 
 ```go
@@ -261,7 +232,7 @@ type nodeCtx struct {
 func (nodeCtx *nodeCtx) Start(ctx context.Context) error
 ```
 
-*Start()* will enter a loop. In each iteration, it tries to collect input messges from *inputChan*, then prepare node's input. When input is ready, it will trigger *node.Operate*. When *node.Operate* returns, it sends the returned *Msg* to *outputChans*, which connects to the downstreams' *inputChans*.
+_Start()_ will enter a loop. In each iteration, it tries to collect input messages from _inputChan_, then prepares the node's input. When the input is ready, it will trigger _node.Operate_. When _node.Operate_ returns, it sends the returned _Msg_ to _outputChans_, which connects to the downstreams' _inputChans_.
 
 ```go
 type TimeTickedFlowGraph struct {
@@ -299,6 +270,8 @@ type Allocator struct {
 
 	CheckSyncFunc func(timeout bool) bool
 	PickCanDoFunc func()
+	SyncErr       error
+	Role          string
 }
 func (ta *Allocator) Start() error
 func (ta *Allocator) Init() error
@@ -307,15 +280,14 @@ func (ta *Allocator) CleanCache() error
 
 ```
 
-
 #### A.6 ID Allocator
 
 ```go
 type IDAllocator struct {
 	Allocator
 
-	masterAddress string
-	master types.MasterService
+	rootCoordAddress string
+	rootCoord types.RootCoord
 
 	countPerRPC uint32
 
@@ -326,45 +298,36 @@ type IDAllocator struct {
 }
 
 func (ia *IDAllocator) Start() error
-func (ia *IDAllocator) connectMaster() error
-func (ia *IDAllocator) syncID() bool
-func (ia *IDAllocator) checkSyncFunc(timeout bool) bool
-func (ia *IDAllocator) pickCanDoFunc()
-func (ia *IDAllocator) processFunc(req Request) error
 func (ia *IDAllocator) AllocOne() (UniqueID, error)
 func (ia *IDAllocator) Alloc(count uint32) (UniqueID, UniqueID, error)
 
 func NewIDAllocator(ctx context.Context, masterAddr string) (*IDAllocator, error)
 ```
 
-
-
-
-
 #### A.6 Timestamp Allocator
 
 ###### A.6.1 Timestamp
 
-Let's take a brief review of Hybrid Logical Clock (HLC). HLC uses 64bits timestamps which are composed of a 46-bits physical component (thought of as and always close to local wall time) and a 18-bits logical component (used to distinguish between events with the same physical component).
+Let's take a brief review of the Hybrid Logical Clock (HLC). HLC uses 64bits timestamps which are composed of a 46-bits physical component (thought of as and always close to local wall time) and an 18-bits logical component (used to distinguish between events with the same physical component).
 
 <img src="./figs/hlc.png" width=400>
 
-HLC's logical part is advanced on each request. The phsical part can be increased in two cases:
+HLC's logical part is advanced on each request. The physical part can be increased in two cases:
 
 A. when the local wall time is greater than HLC's physical part,
 
 B. or the logical part overflows.
 
-In either cases, the physical part will be updated, and the logical part will be set to 0.
+In either case, the physical part will be updated, and the logical part will be set to 0.
 
-Keep the physical part close to local wall time may face non-monotonic problems such as updates to POSIX time that could turn time backward. HLC avoids such problems, since if 'local wall time < HLC's physical part' holds, only case B is satisfied, thus montonicity is guaranteed.
+Keeping the physical part close to local wall time may face non-monotonic problems such as updates to POSIX time that could turn time backward. HLC avoids such problems, since if 'local wall time < HLC's physical part' holds, only case B is satisfied, thus monotonicity is guaranteed.
 
-Milvus does not support transaction, but it should gurantee the deterministic execution of the multi-way WAL. The timestamp attached to each request should
+Milvus does not support transaction, but it should guarantee the deterministic execution of the multi-way WAL. The timestamp attached to each request should
 
-- have its physical part close to wall time (has an acceptable bounded error, a.k.a. uncertainty interval in transaction senarios),
+- have its physical part close to wall time (has an acceptable bounded error, a.k.a. uncertainty interval in transaction scenarios),
 - and be globally unique.
 
-HLC leverages on physical clocks at nodes that are synchronized using the NTP. NTP usually maintain time to within tens of milliseconds over local networks in datacenter. Asymmetric routes and network congestion occasionally cause errors of hundreds of milliseconds. Both the normal time error and the spike are acceptable for Milvus use cases.
+HLC leverages physical clocks at nodes that are synchronized using the NTP. NTP usually maintains time to within tens of milliseconds over local networks in the datacenter. Asymmetric routes and network congestion occasionally cause errors of hundreds of milliseconds. Both the normal time error and the spike are acceptable for Milvus use cases.
 
 The interface of Timestamp is as follows.
 
@@ -376,8 +339,6 @@ type timestamp struct {
 
 type Timestamp uint64
 ```
-
-
 
 ###### A.6.2 Timestamp Oracle
 
@@ -399,16 +360,14 @@ func (t *timestampOracle) UpdateTimestamp() error
 func (t *timestampOracle) ResetTimestamp()
 ```
 
-
-
 ###### A.6.3 Timestamp Allocator
 
 ```go
 type TimestampAllocator struct {
 	Allocator
 
-	masterAddress string
-	masterClient  types.MasterService
+	rootCoordAddress string
+	rootCoordClient  types.RootCoord
 
 	countPerRPC uint32
 	lastTsBegin Timestamp
@@ -424,15 +383,9 @@ func (ta *TimestampAllocator) ClearCache()
 func NewTimestampAllocator(ctx context.Context, masterAddr string) (*TimestampAllocator, error)
 ```
 
+- Batch Allocation of Timestamps
 
-
-* Batch Allocation of Timestamps
-
-* Expiration of Timestamps
-
-
-
-
+- Expiration of Timestamps
 
 #### A.7 KV
 
@@ -447,6 +400,7 @@ type BaseKV interface {
 	MultiSave(kvs map[string]string) error
 	Remove(key string) error
 	MultiRemove(keys []string) error
+	RemoveWithPrefix(key string) error
 
 	Close()
 }
@@ -457,16 +411,47 @@ type BaseKV interface {
 ```go
 type TxnKV interface {
 	BaseKV
-	
+
 	MultiSaveAndRemove(saves map[string]string, removals []string) error
 	MultiRemoveWithPrefix(keys []string) error
 	MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error
 }
 ```
 
+###### A.7.3 MetaKv
 
+```go
+// MetaKv is TxnKV for meta data. It should save data with lease.
+type MetaKv interface {
+	TxnKV
+	GetPath(key string) string
+	LoadWithPrefix(key string) ([]string, []string, error)
+	LoadWithPrefix2(key string) ([]string, []string, []int64, error)
+	LoadWithRevision(key string) ([]string, []string, int64, error)
+	Watch(key string) clientv3.WatchChan
+	WatchWithPrefix(key string) clientv3.WatchChan
+	WatchWithRevision(key string, revision int64) clientv3.WatchChan
+	SaveWithLease(key, value string, id clientv3.LeaseID) error
+	Grant(ttl int64) (id clientv3.LeaseID, err error)
+	KeepAlive(id clientv3.LeaseID) (<-chan *clientv3.LeaseKeepAliveResponse, error)
+	CompareValueAndSwap(key, value, target string, opts ...clientv3.OpOption) error
+	CompareVersionAndSwap(key string, version int64, target string, opts ...clientv3.OpOption) error
+}
 
-###### A.7.3 Etcd KV
+```
+
+###### A.7.4 MetaKv
+
+```go
+type SnapShotKV interface {
+	Save(key string, value string, ts typeutil.Timestamp) error
+	Load(key string, ts typeutil.Timestamp) (string, error)
+	MultiSave(kvs map[string]string, ts typeutil.Timestamp, additions ...func(ts typeutil.Timestamp) (string, string, error)) error
+	LoadWithPrefix(key string, ts typeutil.Timestamp) ([]string, []string, error)
+	MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string, ts typeutil.Timestamp, additions ...func(ts typeutil.Timestamp) (string, string, error)) error
+```
+
+###### A.7.5 Etcd KV
 
 ```go
 type EtcdKV struct {
@@ -488,13 +473,14 @@ func (kv *EtcdKV) MultiRemove(keys []string) error
 func (kv *EtcdKV) MultiSaveAndRemove(saves map[string]string, removals []string) error
 func (kv *EtcdKV) Watch(key string) clientv3.WatchChan
 func (kv *EtcdKV) WatchWithPrefix(key string) clientv3.WatchChan
+func (kv *EtcdKV) WatchWithRevision(key string, revision int64) clientv3.WatchChan
 
 func NewEtcdKV(etcdAddr string, rootPath string) *EtcdKV
 ```
 
-EtcdKV implements all *TxnKV* interfaces.
+EtcdKV implements all _TxnKV_ interfaces.
 
-###### A.7.4 Memory KV
+###### A.7.6 Memory KV
 
 ```go
 type MemoryKV struct {
@@ -517,9 +503,9 @@ func (kv *MemoryKV) MultiRemoveWithPrefix(keys []string) error
 func (kv *MemoryKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error
 ```
 
-MemoryKV implements all *TxnKV* interfaces.
+MemoryKV implements all _TxnKV_ interfaces.
 
-###### A.7.5 MinIO KV
+###### A.7.7 MinIO KV
 
 ```go
 type MinIOKV struct {
@@ -539,9 +525,9 @@ func (kv *MinIOKV) MultiRemove(keys []string) error
 func (kv *MinIOKV) Close()
 ```
 
-MinIOKV implements all *KV* interfaces.
+MinIOKV implements all _KV_ interfaces.
 
-###### A.7.6 RocksdbKV KV
+###### A.7.8 RocksdbKV KV
 
 ```go
 type RocksdbKV struct {
@@ -567,6 +553,4 @@ func (kv *RocksdbKV) MultiRemoveWithPrefix(keys []string) error
 func (kv *RocksdbKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error
 ```
 
-RocksdbKV implements all *TxnKV* interfaces.h
-
-
+RocksdbKV implements all _TxnKV_ interfaces.h

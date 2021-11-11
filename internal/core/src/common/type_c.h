@@ -36,11 +36,27 @@ typedef struct CStatus {
     const char* error_msg;
 } CStatus;
 
+typedef struct CProto {
+    const void* proto_blob;
+    int64_t proto_size;
+} CProto;
+
 typedef struct CLoadFieldDataInfo {
     int64_t field_id;
     void* blob;
     int64_t row_count;
 } CLoadFieldDataInfo;
+
+typedef struct CLoadDeletedRecordInfo {
+    void* timestamps;
+    void* primary_keys;
+    int64_t row_count;
+} CLoadDeletedRecordInfo;
+
+typedef struct CProtoResult {
+    CStatus status;
+    CProto proto;
+} CProtoResult;
 
 #ifdef __cplusplus
 }

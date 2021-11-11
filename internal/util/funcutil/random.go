@@ -12,20 +12,34 @@
 package funcutil
 
 import (
+	"fmt"
 	"math/rand"
 	"time"
 )
 
+var r *rand.Rand = nil
+
 func init() {
-	rand.Seed(time.Now().UnixNano())
+	r = rand.New(rand.NewSource(time.Now().UnixNano()))
 }
 
 var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
+// RandomString returns a batch of random string
 func RandomString(n int) string {
 	b := make([]rune, n)
 	for i := range b {
-		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+		b[i] = letterRunes[r.Intn(len(letterRunes))]
 	}
 	return string(b)
+}
+
+// GenRandomStr generates a random string.
+func GenRandomStr() string {
+	l := rand.Uint64()%10 + 1
+	b := make([]byte, l)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%X", b)
 }

@@ -14,11 +14,14 @@ package trace
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"errors"
 
+	"github.com/opentracing/opentracing-go"
 	oplog "github.com/opentracing/opentracing-go/log"
+	"github.com/stretchr/testify/assert"
 )
 
 type simpleStruct struct {
@@ -26,17 +29,26 @@ type simpleStruct struct {
 	value string
 }
 
-func TestTracing(t *testing.T) {
-	//Already Init in each framework, this can be ignored in debug
+func TestMain(m *testing.M) {
 	closer := InitTracing("test")
 	defer closer.Close()
+	os.Exit(m.Run())
+}
 
+func TestInit(t *testing.T) {
+	cfg := initFromEnv("test")
+	assert.NotNil(t, cfg)
+}
+
+func TestTracing(t *testing.T) {
 	// context normally can be propagated through func params
 	ctx := context.Background()
 
 	//start span
 	//default use function name for operation name
 	sp, ctx := StartSpanFromContext(ctx)
+	id, sampled, found := InfoFromContext(ctx)
+	fmt.Printf("traceID = %s, sampled = %t, found = %t", id, sampled, found)
 	sp.SetTag("tag1", "tag1")
 	// use self-defined operation name for span
 	// sp, ctx := StartSpanFromContextWithOperationName(ctx, "self-defined name")
@@ -69,11 +81,56 @@ func caller(ctx context.Context) error {
 		}
 
 		if err != nil {
+			LogError(sp, err)
 			sp.Finish()
-			return LogError(sp, err)
+			return nil
 		}
 
 		sp.Finish()
 	}
 	return nil
+}
+
+func TestInject(t *testing.T) {
+	// context normally can be propagated through func params
+	ctx := context.Background()
+
+	//start span
+	//default use function name for operation name
+	sp, ctx := StartSpanFromContext(ctx)
+	id, sampled, found := InfoFromContext(ctx)
+	fmt.Printf("traceID = %s, sampled = %t, found = %t", id, sampled, found)
+	pp := PropertiesReaderWriter{PpMap: map[string]string{}}
+	InjectContextToPulsarMsgProperties(sp.Context(), pp.PpMap)
+	tracer := opentracing.GlobalTracer()
+	sc, _ := tracer.Extract(opentracing.TextMap, pp)
+	assert.NotNil(t, sc)
+
+}
+
+func TestTraceError(t *testing.T) {
+	// context normally can be propagated through func params
+	sp, ctx := StartSpanFromContext(nil)
+	assert.Nil(t, ctx)
+	assert.NotNil(t, sp)
+
+	sp, ctx = StartSpanFromContextWithOperationName(nil, "test")
+	assert.Nil(t, ctx)
+	assert.NotNil(t, sp)
+
+	//Will Cause span log error
+	StartSpanFromContextWithOperationNameWithSkip(context.Background(), "test", 10000)
+
+	//Will Cause span log error
+	StartSpanFromContextWithSkip(context.Background(), 10000)
+
+	id, sampled, found := InfoFromSpan(nil)
+	assert.Equal(t, id, "")
+	assert.Equal(t, sampled, false)
+	assert.Equal(t, found, false)
+
+	id, sampled, found = InfoFromContext(nil)
+	assert.Equal(t, id, "")
+	assert.Equal(t, sampled, false)
+	assert.Equal(t, found, false)
 }

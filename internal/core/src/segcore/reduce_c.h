@@ -15,8 +15,10 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "segcore/segment_c.h"
+
 #include "common/type_c.h"
+#include "segcore/plan_c.h"
+#include "segcore/segment_c.h"
 
 typedef void* CMarshaledHits;
 
@@ -27,23 +29,10 @@ int
 MergeInto(int64_t num_queries, int64_t topk, float* distances, int64_t* uids, float* new_distances, int64_t* new_uids);
 
 CStatus
-ReduceQueryResults(CQueryResult* query_results, int64_t num_segments, bool* is_selected);
+ReduceSearchResultsAndFillData(CSearchPlan c_plan, CSearchResult* search_results, int64_t num_segments);
 
 CStatus
-ReorganizeQueryResults(CMarshaledHits* c_marshaled_hits,
-                       CPlaceholderGroup* c_placeholder_groups,
-                       int64_t num_groups,
-                       CQueryResult* c_search_results,
-                       bool* is_selected,
-                       int64_t num_segments,
-                       CPlan c_plan);
-
-CStatus
-ReorganizeSingleQueryResult(CMarshaledHits* c_marshaled_hits,
-                            CPlaceholderGroup* c_placeholder_groups,
-                            int64_t num_groups,
-                            CQueryResult c_search_result,
-                            CPlan c_plan);
+ReorganizeSearchResults(CMarshaledHits* c_marshaled_hits, CSearchResult* c_search_results, int64_t num_segments);
 
 int64_t
 GetHitsBlobSize(CMarshaledHits c_marshaled_hits);
@@ -52,10 +41,10 @@ void
 GetHitsBlob(CMarshaledHits c_marshaled_hits, const void* hits);
 
 int64_t
-GetNumQueriesPeerGroup(CMarshaledHits c_marshaled_hits, int64_t group_index);
+GetNumQueriesPerGroup(CMarshaledHits c_marshaled_hits, int64_t group_index);
 
 void
-GetHitSizePeerQueries(CMarshaledHits c_marshaled_hits, int64_t group_index, int64_t* hit_size_peer_query);
+GetHitSizePerQueries(CMarshaledHits c_marshaled_hits, int64_t group_index, int64_t* hit_size_peer_query);
 
 #ifdef __cplusplus
 }

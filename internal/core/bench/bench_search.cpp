@@ -20,18 +20,12 @@ using namespace milvus;
 using namespace milvus::query;
 using namespace milvus::segcore;
 
-static int dim = 128;
-static int64_t N = 1024 * 1024 * 1;
+static int dim = 768;
 
 const auto schema = []() {
     auto schema = std::make_shared<Schema>();
     schema->AddDebugField("fakevec", DataType::VECTOR_FLOAT, dim, MetricType::METRIC_L2);
     return schema;
-}();
-
-const auto dataset_ = [] {
-    auto dataset_ = DataGen(schema, N);
-    return dataset_;
 }();
 
 const auto plan = [] {
@@ -43,7 +37,7 @@ const auto plan = [] {
                     "fakevec": {
                         "metric_type": "L2",
                         "params": {
-                            "nprobe": 4
+                            "nprobe": 10
                         },
                         "query": "$0",
                         "topk": 5
@@ -57,7 +51,7 @@ const auto plan = [] {
     return plan;
 }();
 auto ph_group = [] {
-    auto num_queries = 5;
+    auto num_queries = 10;
     auto ph_group_raw = CreatePlaceholderGroup(num_queries, dim, 1024);
     auto ph_group = ParsePlaceholderGroup(plan.get(), ph_group_raw.SerializeAsString());
     return ph_group;
@@ -67,13 +61,19 @@ static void
 Search_SmallIndex(benchmark::State& state) {
     // schema->AddDebugField("age", DataType::FLOAT);
 
+    static int64_t N = 1024 * 32;
+    const auto dataset_ = [] {
+        auto dataset_ = DataGen(schema, N);
+        return dataset_;
+    }();
+
     auto is_small_index = state.range(0);
-    auto chunk_size = state.range(1) * 1024;
+    auto chunk_rows = state.range(1) * 1024;
     auto segconf = SegcoreConfig::default_config();
-    segconf.set_size_per_chunk(chunk_size);
+    segconf.set_chunk_rows(chunk_rows);
     auto segment = CreateGrowingSegment(schema, segconf);
     if (!is_small_index) {
-        segment->debug_disable_small_index();
+        segment->disable_small_index();
     }
     segment->PreInsert(N);
     ColumnBasedRawData raw_data;
@@ -82,18 +82,22 @@ Search_SmallIndex(benchmark::State& state) {
     segment->Insert(0, N, dataset_.row_ids_.data(), dataset_.timestamps_.data(), raw_data);
 
     Timestamp time = 10000000;
-    std::vector<const PlaceholderGroup*> ph_group_arr = {ph_group.get()};
 
     for (auto _ : state) {
-        auto qr = segment->Search(plan.get(), ph_group_arr.data(), &time, 1);
+        auto qr = segment->Search(plan.get(), *ph_group, time);
     }
 }
 
-BENCHMARK(Search_SmallIndex)->MinTime(5)->ArgsProduct({{true, false}, {8, 16, 32, 64, 128}});
+BENCHMARK(Search_SmallIndex)->MinTime(5)->ArgsProduct({{true, false}, {8, 16, 32}});
 
 static void
 Search_Sealed(benchmark::State& state) {
     auto segment = CreateSealedSegment(schema);
+    static int64_t N = 1024 * 1024;
+    const auto dataset_ = [] {
+        auto dataset_ = DataGen(schema, N);
+        return dataset_;
+    }();
     SealedLoader(dataset_, *segment);
     auto choice = state.range(0);
     if (choice == 0) {
@@ -104,16 +108,15 @@ Search_Sealed(benchmark::State& state) {
         auto indexing = GenIndexing(N, dim, vec);
         LoadIndexInfo info;
         info.index = indexing;
+        info.field_id = (*schema)[FieldName("fakevec")].get_id().get();
         info.index_params["index_type"] = "IVF";
         info.index_params["index_mode"] = "CPU";
         info.index_params["metric_type"] = MetricTypeToName(MetricType::METRIC_L2);
         segment->LoadIndex(info);
     }
     Timestamp time = 10000000;
-    std::vector<const PlaceholderGroup*> ph_group_arr = {ph_group.get()};
-
     for (auto _ : state) {
-        auto qr = segment->Search(plan.get(), ph_group_arr.data(), &time, 1);
+        auto qr = segment->Search(plan.get(), *ph_group, time);
     }
 }
 

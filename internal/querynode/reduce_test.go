@@ -12,7 +12,6 @@
 package querynode
 
 import (
-	"encoding/binary"
 	"log"
 	"math"
 	"testing"
@@ -20,6 +19,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/milvuspb"
 )
 
@@ -29,23 +29,23 @@ func TestReduce_AllFunc(t *testing.T) {
 	collectionMeta := genTestCollectionMeta(collectionID, false)
 
 	collection := newCollection(collectionMeta.ID, collectionMeta.Schema)
-	segment := newSegment(collection, segmentID, defaultPartitionID, collectionID, segmentTypeGrowing)
+	segment := newSegment(collection, segmentID, defaultPartitionID, collectionID, "", segmentTypeGrowing, true)
 
 	const DIM = 16
 	var vec = [DIM]float32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
 	// start search service
-	dslString := "{\"bool\": { \n\"vector\": {\n \"vec\": {\n \"metric_type\": \"L2\", \n \"params\": {\n \"nprobe\": 10 \n},\n \"query\": \"$0\",\"topk\": 10 \n } \n } \n } \n }"
+	dslString := "{\"bool\": { \n\"vector\": {\n \"vec\": {\n \"metric_type\": \"L2\", \n \"params\": {\n \"nprobe\": 10 \n},\n \"query\": \"$0\",\n \"topk\": 10 \n,\"round_decimal\": 6\n } \n } \n } \n }"
 	var searchRawData1 []byte
 	var searchRawData2 []byte
 	for i, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele+float32(i*2)))
+		common.Endian.PutUint32(buf, math.Float32bits(ele+float32(i*2)))
 		searchRawData1 = append(searchRawData1, buf...)
 	}
 	for i, ele := range vec {
 		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, math.Float32bits(ele+float32(i*4)))
+		common.Endian.PutUint32(buf, math.Float32bits(ele+float32(i*4)))
 		searchRawData2 = append(searchRawData2, buf...)
 	}
 	placeholderValue := milvuspb.PlaceholderValue{
@@ -63,7 +63,7 @@ func TestReduce_AllFunc(t *testing.T) {
 		log.Print("marshal placeholderGroup failed")
 	}
 
-	plan, err := createPlan(*collection, dslString)
+	plan, err := createSearchPlan(collection, dslString)
 	assert.NoError(t, err)
 	holder, err := parseSearchRequest(plan, placeGroupByte)
 	assert.NoError(t, err)
@@ -71,19 +71,14 @@ func TestReduce_AllFunc(t *testing.T) {
 	placeholderGroups = append(placeholderGroups, holder)
 
 	searchResults := make([]*SearchResult, 0)
-	matchedSegment := make([]*Segment, 0)
-	searchResult, err := segment.segmentSearch(plan, placeholderGroups, []Timestamp{0})
+	searchResult, err := segment.search(plan, placeholderGroups, []Timestamp{0})
 	assert.Nil(t, err)
 	searchResults = append(searchResults, searchResult)
-	matchedSegment = append(matchedSegment, segment)
 
-	testReduce := make([]bool, len(searchResults))
-	err = reduceSearchResults(searchResults, 1, testReduce)
-	assert.Nil(t, err)
-	err = fillTargetEntry(plan, searchResults, matchedSegment, testReduce)
+	err = reduceSearchResultsAndFillData(plan, searchResults, 1)
 	assert.Nil(t, err)
 
-	marshaledHits, err := reorganizeQueryResults(plan, placeholderGroups, searchResults, 1, testReduce)
+	marshaledHits, err := reorganizeSearchResults(searchResults, 1)
 	assert.NotNil(t, marshaledHits)
 	assert.Nil(t, err)
 
@@ -110,4 +105,10 @@ func TestReduce_AllFunc(t *testing.T) {
 	deleteMarshaledHits(marshaledHits)
 	deleteSegment(segment)
 	deleteCollection(collection)
+}
+
+func TestReduce_nilPlan(t *testing.T) {
+	plan := &SearchPlan{}
+	err := reduceSearchResultsAndFillData(plan, nil, 1)
+	assert.Error(t, err)
 }

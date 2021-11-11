@@ -33,7 +33,7 @@ tools/bin/revive: tools/check/go.mod
 cppcheck:
 	@(env bash ${PWD}/scripts/core_build.sh -l)
 
-generated-proto-go:export protoc:=${PWD}/cmake_build/thirdparty/protobuf/protobuf-build/protoc
+generated-proto-go: export protoc:=${PWD}/cmake_build/thirdparty/protobuf/protobuf-build/protoc
 generated-proto-go: build-cpp
 	@mkdir -p ${GOPATH}/bin
 	@which protoc-gen-go 1>/dev/null || (echo "Installing protoc-gen-go" && go get github.com/golang/protobuf/protoc-gen-go@v1.3.2)
@@ -53,7 +53,7 @@ else
 	@GO111MODULE=on env bash $(PWD)/scripts/gofmt.sh tests/go/
 endif
 
-lint:tools/bin/revive
+lint: tools/bin/revive
 	@echo "Running $@ check"
 	@tools/bin/revive -formatter friendly -config tools/check/revive.toml ./...
 
@@ -63,7 +63,7 @@ static-check:
 	@GO111MODULE=on ${GOPATH}/bin/golangci-lint cache clean
 	@GO111MODULE=on ${GOPATH}/bin/golangci-lint run --timeout=30m --config ./.golangci.yml ./internal/...
 	@GO111MODULE=on ${GOPATH}/bin/golangci-lint run --timeout=30m --config ./.golangci.yml ./cmd/...
-	@GO111MODULE=on ${GOPATH}/bin/golangci-lint run --timeout=30m --config ./.golangci.yml ./tests/go/...
+#	@GO111MODULE=on ${GOPATH}/bin/golangci-lint run --timeout=30m --config ./.golangci.yml ./tests/go_client/...
 
 ruleguard:
 ifdef GO_DIFF_FILES
@@ -73,101 +73,87 @@ else
 	@echo "Running $@ check"
 	@${GOPATH}/bin/ruleguard -rules ruleguard.rules.go ./internal/...
 	@${GOPATH}/bin/ruleguard -rules ruleguard.rules.go ./cmd/...
-	@${GOPATH}/bin/ruleguard -rules ruleguard.rules.go ./tests/go/...
+#	@${GOPATH}/bin/ruleguard -rules ruleguard.rules.go ./tests/go/...
 endif
 
-verifiers: getdeps cppcheck fmt static-check ruleguard
+verifiers: build-cpp getdeps cppcheck fmt static-check ruleguard
 
-# Builds various components locally.
+# Build various components locally.
 binlog:
 	@echo "Building binlog ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/binlog $(PWD)/cmd/binlog/main.go 1>/dev/null
+	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/binlog $(PWD)/cmd/tools/binlog/main.go 1>/dev/null
 
-master:
-	@echo "Building master ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/masterservice $(PWD)/cmd/masterservice/main.go 1>/dev/null
-
-proxyservice:
-	@echo "Building proxyservice ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/proxyservice $(PWD)/cmd/proxy/service/proxy_service.go 1>/dev/null
-
-proxynode:
-	@echo "Building proxynode ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/proxynode $(PWD)/cmd/proxy/node/proxy_node.go 1>/dev/null
-
-queryservice:
-	@echo "Building queryservice ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/queryservice $(PWD)/cmd/queryservice/queryservice.go 1>/dev/null
-
-querynode:
-	@echo "Building querynode ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/querynode $(PWD)/cmd/querynode/querynode.go 1>/dev/null
-
-dataservice:
-	@echo "Building dataservice ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/dataservice $(PWD)/cmd/dataservice/main.go 1>/dev/null
-
-datanode:
-	@echo "Building datanode ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/datanode $(PWD)/cmd/datanode/main.go 1>/dev/null
-
-indexservice: build-cpp
-	@echo "Building indexservice ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/indexservice $(PWD)/cmd/indexservice/main.go 1>/dev/null
-
-indexnode: build-cpp
-	@echo "Building indexnode ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/indexnode $(PWD)/cmd/indexnode/main.go 1>/dev/null
-
-standalone: build-cpp
-	@echo "Building Milvus standalone ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/standalone $(PWD)/cmd/standalone/main.go 1>/dev/null
+BUILD_TAGS = $(shell git describe --tags --always --dirty="-dev")
+BUILD_TIME = $(shell date --utc)
+GIT_COMMIT = $(shell git rev-parse --short HEAD)
+GO_VERSION = $(shell go version)
 
 milvus: build-cpp
-	@echo "Building Milvus distributed ..."
-	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build -o $(INSTALL_PATH)/milvus $(PWD)/cmd/distributed/main.go 1>/dev/null
+	@echo "Building Milvus ..."
+	@mkdir -p $(INSTALL_PATH) && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build \
+		-ldflags="-X 'main.BuildTags=$(BUILD_TAGS)' -X 'main.BuildTime=$(BUILD_TIME)' -X 'main.GitCommit=$(GIT_COMMIT)' -X 'main.GoVersion=$(GO_VERSION)'" \
+		-o $(INSTALL_PATH)/milvus $(PWD)/cmd/main.go 1>/dev/null
 
-build-go: standalone milvus
+build-go: milvus
 
 build-cpp:
+	@echo "Building Milvus cpp library ..."
 	@(env bash $(PWD)/scripts/core_build.sh -f "$(CUSTOM_THIRDPARTY_PATH)")
 	@(env bash $(PWD)/scripts/cwrapper_build.sh -t Release -f "$(CUSTOM_THIRDPARTY_PATH)")
-	@go env -w CGO_CFLAGS="-I$(PWD)/internal/kv/rocksdb/cwrapper/output/include"
-	@go env -w CGO_LDFLAGS="-L$(PWD)/internal/kv/rocksdb/cwrapper/output/lib -l:librocksdb.a -lstdc++ -lm -lz"
+	@(env bash $(PWD)/scripts/cwrapper_dablooms_build.sh -t Release -f "$(CUSTOM_THIRDPARTY_PATH)")
 	@(env bash $(PWD)/scripts/cwrapper_rocksdb_build.sh -t Release -f "$(CUSTOM_THIRDPARTY_PATH)")
-	@go get github.com/tecbot/gorocksdb
 
 build-cpp-with-unittest:
-	@(env bash $(PWD)/scripts/core_build.sh -u -f "$(CUSTOM_THIRDPARTY_PATH)")
+	@echo "Building Milvus cpp library with unittest ..."
+	@(env bash $(PWD)/scripts/core_build.sh -u -c -f "$(CUSTOM_THIRDPARTY_PATH)")
 	@(env bash $(PWD)/scripts/cwrapper_build.sh -t Release -f "$(CUSTOM_THIRDPARTY_PATH)")
 
-# Runs the tests.
+# Run the tests.
 unittest: test-cpp test-go
 
-#TODO: proxynode master query node writer's unittest
-test-go:build-cpp
+test-proxy:
 	@echo "Running go unittests..."
-	@echo "disable go unittest for now, enable it later"
-	@(env bash $(PWD)/scripts/run_go_unittest.sh)
+	go test -race -coverpkg=./... -coverprofile=profile.out -covermode=atomic -timeout 5m github.com/milvus-io/milvus/internal/proxy -v
+
+
+test-querycoord:
+	@echo "Running go unittests..."
+	go test -race -coverpkg=./... -coverprofile=profile.out -covermode=atomic -timeout 5m github.com/milvus-io/milvus/internal/querycoord	-v
+
+
+test-go: build-cpp-with-unittest
+	@echo "Running go unittests..."
+	@(env bash $(PWD)/scripts/run_go_codecov.sh)
+# 	@(env bash $(PWD)/scripts/run_go_unittest.sh)
 
 test-cpp: build-cpp-with-unittest
 	@echo "Running cpp unittests..."
-	@(env bash $(PWD)/scripts/run_cpp_unittest.sh)
+	@(env bash $(PWD)/scripts/run_cpp_codecov.sh)
+#	@(env bash $(PWD)/scripts/run_cpp_unittest.sh)
 
-# Run go-codecov
-go-codecov:
-	@echo "Running go unittests..."
+# Run code coverage.
+codecov: codecov-go codecov-cpp
+
+# Run codecov-go
+codecov-go: build-cpp-with-unittest
+	@echo "Running go coverage..."
 	@(env bash $(PWD)/scripts/run_go_codecov.sh)
 
-#TODO: build each component to docker
-docker: verifiers
+# Run codecov-cpp
+codecov-cpp: build-cpp-with-unittest
+	@echo "Running cpp coverage..."
+	@(env bash $(PWD)/scripts/run_cpp_codecov.sh)
 
-# Builds each component and installs it to $GOPATH/bin.
+# Package docker image locally.
+# TODO: fix error occur at starting up
+docker: install
+	./build/build_image.sh
+
+# Build each component and install binary to $GOPATH/bin.
 install: all
 	@echo "Installing binary to './bin'"
-	@mkdir -p $(GOPATH)/bin && cp -f $(PWD)/bin/standalone $(GOPATH)/bin/standalone
 	@mkdir -p $(GOPATH)/bin && cp -f $(PWD)/bin/milvus $(GOPATH)/bin/milvus
-	@mkdir -p $(LIBRARY_PATH) && cp -f $(PWD)/internal/core/output/lib/* $(LIBRARY_PATH)
+	@mkdir -p $(LIBRARY_PATH) && cp -P $(PWD)/internal/core/output/lib/* $(LIBRARY_PATH)
 	@echo "Installation successful."
 
 clean:
@@ -176,5 +162,10 @@ clean:
 	@find . -name '*~' | xargs rm -fv
 	@rm -rf bin/
 	@rm -rf lib/
-	@rm $(GOPATH)/bin/standalone
-	@rm $(GOPATH)/bin/milvus
+	@rm -rf $(GOPATH)/bin/milvus
+
+milvus-tools: 
+	@echo "Building tools ..."
+	@mkdir -p $(INSTALL_PATH)/tools && go env -w CGO_ENABLED="1" && GO111MODULE=on $(GO) build \
+		-ldflags="-X 'main.BuildTags=$(BUILD_TAGS)' -X 'main.BuildTime=$(BUILD_TIME)' -X 'main.GitCommit=$(GIT_COMMIT)' -X 'main.GoVersion=$(GO_VERSION)'" \
+		-o $(INSTALL_PATH)/tools $(PWD)/cmd/tools/* 1>/dev/null

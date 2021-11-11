@@ -14,6 +14,7 @@
 // DO NOT EDIT
 #include <optional>
 #include <boost/dynamic_bitset.hpp>
+#include <boost/variant.hpp>
 #include <utility>
 #include <deque>
 #include "segcore/SegmentGrowingImpl.h"
@@ -24,16 +25,22 @@ namespace milvus::query {
 class VerifyExprVisitor : public ExprVisitor {
  public:
     void
-    visit(BoolUnaryExpr& expr) override;
+    visit(LogicalUnaryExpr& expr) override;
 
     void
-    visit(BoolBinaryExpr& expr) override;
+    visit(LogicalBinaryExpr& expr) override;
 
     void
     visit(TermExpr& expr) override;
 
     void
-    visit(RangeExpr& expr) override;
+    visit(UnaryRangeExpr& expr) override;
+
+    void
+    visit(BinaryRangeExpr& expr) override;
+
+    void
+    visit(CompareExpr& expr) override;
 
  public:
 };

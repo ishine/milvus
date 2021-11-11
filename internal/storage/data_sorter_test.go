@@ -123,52 +123,52 @@ func TestDataSorter(t *testing.T) {
 	insertDataFirst := &InsertData{
 		Data: map[int64]FieldData{
 			0: &Int64FieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []int64{6, 4},
 			},
 			1: &Int64FieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []int64{3, 4},
 			},
 			100: &BoolFieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []bool{true, false},
 			},
 			101: &Int8FieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []int8{3, 4},
 			},
 			102: &Int16FieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []int16{3, 4},
 			},
 			103: &Int32FieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []int32{3, 4},
 			},
 			104: &Int64FieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []int64{3, 4},
 			},
 			105: &FloatFieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []float32{3, 4},
 			},
 			106: &DoubleFieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []float64{3, 4},
 			},
 			107: &StringFieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []string{"3", "4"},
 			},
 			108: &BinaryVectorFieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []byte{0, 255},
 				Dim:     8,
 			},
 			109: &FloatVectorFieldData{
-				NumRows: 2,
+				NumRows: []int64{2},
 				Data:    []float32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 				Dim:     8,
 			},
@@ -233,4 +233,93 @@ func TestDataSorter(t *testing.T) {
 	assert.Equal(t, []string{"4", "3"}, dataSorter.InsertData.Data[107].(*StringFieldData).Data)
 	assert.Equal(t, []byte{255, 0}, dataSorter.InsertData.Data[108].(*BinaryVectorFieldData).Data)
 	assert.Equal(t, []float32{8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7}, dataSorter.InsertData.Data[109].(*FloatVectorFieldData).Data)
+}
+
+func TestDataSorter_Len(t *testing.T) {
+	insertData := &InsertData{
+		Data: map[int64]FieldData{
+			1: &Int64FieldData{
+				NumRows: []int64{2},
+				Data:    []int64{6, 4},
+			},
+		},
+	}
+
+	dataSorter := &DataSorter{
+		InsertCodec: nil,
+		InsertData:  insertData,
+	}
+
+	n := dataSorter.Len()
+	assert.Equal(t, n, 0)
+
+	insertData = &InsertData{
+		Data: map[int64]FieldData{
+			0: &Int8FieldData{
+				NumRows: []int64{2},
+				Data:    []int8{3, 4},
+			},
+		},
+	}
+
+	dataSorter = &DataSorter{
+		InsertCodec: nil,
+		InsertData:  insertData,
+	}
+
+	n = dataSorter.Len()
+	assert.Equal(t, n, 0)
+}
+
+func TestDataSorter_Less(t *testing.T) {
+	insertData := &InsertData{
+		Data: map[int64]FieldData{
+			1: &Int64FieldData{
+				NumRows: []int64{2},
+				Data:    []int64{6, 4},
+			},
+		},
+	}
+
+	dataSorter := &DataSorter{
+		InsertCodec: nil,
+		InsertData:  insertData,
+	}
+
+	res := dataSorter.Less(1, 2)
+	assert.True(t, res)
+
+	insertData = &InsertData{
+		Data: map[int64]FieldData{
+			0: &Int8FieldData{
+				NumRows: []int64{2},
+				Data:    []int8{3, 4},
+			},
+		},
+	}
+
+	dataSorter = &DataSorter{
+		InsertCodec: nil,
+		InsertData:  insertData,
+	}
+
+	res = dataSorter.Less(1, 2)
+	assert.True(t, res)
+
+	insertData = &InsertData{
+		Data: map[int64]FieldData{
+			0: &Int64FieldData{
+				NumRows: []int64{2},
+				Data:    []int64{6, 4},
+			},
+		},
+	}
+
+	dataSorter = &DataSorter{
+		InsertCodec: nil,
+		InsertData:  insertData,
+	}
+
+	res = dataSorter.Less(-1, -2)
+	assert.True(t, res)
 }

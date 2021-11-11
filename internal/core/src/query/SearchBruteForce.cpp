@@ -14,7 +14,7 @@
 #include <common/Types.h>
 #include <boost/dynamic_bitset.hpp>
 #include <queue>
-#include "SubQueryResult.h"
+#include "SubSearchResult.h"
 
 #include <faiss/utils/distances.h>
 #include <faiss/utils/BinaryDistance.h>
@@ -61,16 +61,17 @@ raw_search(MetricType metric_type,
     }
 }
 
-SubQueryResult
+SubSearchResult
 BinarySearchBruteForceFast(MetricType metric_type,
                            int64_t dim,
                            const uint8_t* binary_chunk,
                            int64_t size_per_chunk,
                            int64_t topk,
                            int64_t num_queries,
+                           int64_t round_decimal,
                            const uint8_t* query_data,
                            const faiss::BitsetView& bitset) {
-    SubQueryResult sub_result(num_queries, topk, metric_type);
+    SubSearchResult sub_result(num_queries, topk, metric_type, round_decimal);
     float* result_distances = sub_result.get_values();
     idx_t* result_labels = sub_result.get_labels();
 
@@ -79,43 +80,46 @@ BinarySearchBruteForceFast(MetricType metric_type,
 
     raw_search(metric_type, binary_chunk, size_per_chunk, code_size, num_queries, query_data, topk, result_distances,
                result_labels, bitset);
-
+    sub_result.round_values();
     return sub_result;
 }
 
-SubQueryResult
-FloatSearchBruteForce(const dataset::QueryDataset& query_dataset,
+SubSearchResult
+FloatSearchBruteForce(const dataset::SearchDataset& dataset,
                       const void* chunk_data_raw,
                       int64_t size_per_chunk,
                       const faiss::BitsetView& bitset) {
-    auto metric_type = query_dataset.metric_type;
-    auto num_queries = query_dataset.num_queries;
-    auto topk = query_dataset.topk;
-    auto dim = query_dataset.dim;
-    SubQueryResult sub_qr(num_queries, topk, metric_type);
-    auto query_data = reinterpret_cast<const float*>(query_dataset.query_data);
+    auto metric_type = dataset.metric_type;
+    auto num_queries = dataset.num_queries;
+    auto topk = dataset.topk;
+    auto dim = dataset.dim;
+    auto round_decimal = dataset.round_decimal;
+    SubSearchResult sub_qr(num_queries, topk, metric_type, round_decimal);
+    auto query_data = reinterpret_cast<const float*>(dataset.query_data);
     auto chunk_data = reinterpret_cast<const float*>(chunk_data_raw);
 
     if (metric_type == MetricType::METRIC_L2) {
         faiss::float_maxheap_array_t buf{(size_t)num_queries, (size_t)topk, sub_qr.get_labels(), sub_qr.get_values()};
         faiss::knn_L2sqr(query_data, chunk_data, dim, num_queries, size_per_chunk, &buf, bitset);
+        sub_qr.round_values();
         return sub_qr;
     } else {
         faiss::float_minheap_array_t buf{(size_t)num_queries, (size_t)topk, sub_qr.get_labels(), sub_qr.get_values()};
         faiss::knn_inner_product(query_data, chunk_data, dim, num_queries, size_per_chunk, &buf, bitset);
+        sub_qr.round_values();
         return sub_qr;
     }
 }
 
-SubQueryResult
-BinarySearchBruteForce(const dataset::QueryDataset& query_dataset,
+SubSearchResult
+BinarySearchBruteForce(const dataset::SearchDataset& dataset,
                        const void* chunk_data_raw,
                        int64_t size_per_chunk,
                        const faiss::BitsetView& bitset) {
     // TODO: refactor the internal function
-    auto query_data = reinterpret_cast<const uint8_t*>(query_dataset.query_data);
+    auto query_data = reinterpret_cast<const uint8_t*>(dataset.query_data);
     auto chunk_data = reinterpret_cast<const uint8_t*>(chunk_data_raw);
-    return BinarySearchBruteForceFast(query_dataset.metric_type, query_dataset.dim, chunk_data, size_per_chunk,
-                                      query_dataset.topk, query_dataset.num_queries, query_data, bitset);
+    return BinarySearchBruteForceFast(dataset.metric_type, dataset.dim, chunk_data, size_per_chunk, dataset.topk,
+                                      dataset.num_queries, dataset.round_decimal, query_data, bitset);
 }
 }  // namespace milvus::query

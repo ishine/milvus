@@ -9,7 +9,7 @@
 # is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 # or implied. See the License for the specific language governing permissions and limitations under the License.
 
-cmake_minimum_required(VERSION 3.14...3.17 FATAL_ERROR)
+cmake_minimum_required( VERSION 3.18 )
 project(wrapper)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -26,6 +26,10 @@ else()
     set( THIRDPARTY_DOWNLOAD_PATH ${CMAKE_BINARY_DIR}/3rdparty_download/download )
 endif()
 message( STATUS "Thirdparty downloaded file path: ${THIRDPARTY_DOWNLOAD_PATH}" )
+
+# These three components is required by arrow
+find_package(Boost REQUIRED COMPONENTS regex system filesystem)
+message( STATUS "Find Boost: include dirs-${Boost_INCLUDE_DIRS}, version-${Boost_VERSION}")
 
 macro( build_arrow )
     message( STATUS "Building ARROW-${ARROW_VERSION} from source" )
@@ -53,6 +57,7 @@ macro( build_arrow )
         "-DARROW_S3=OFF"
         "-DCMAKE_VERBOSE_MAKEFILE=ON"
         "-DCMAKE_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}"
+        "-DCMAKE_INCLUDE_PATH=${Boost_INCLUDE_DIRS}"
         )
 
     ExternalProject_Add(
@@ -83,6 +88,7 @@ macro( build_arrow )
         file( MAKE_DIRECTORY "${UTF8PROC_LOCATION}/include" )
     endif()
 
+    include(GNUInstallDirs)
 
     add_library( thrift STATIC IMPORTED )
     set_target_properties( thrift
@@ -104,7 +110,7 @@ macro( build_arrow )
     set_target_properties( arrow
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libarrow.a
+                IMPORTED_LOCATION               ${INSTALL_DIR}/${CMAKE_INSTALL_LIBDIR}/libarrow.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies(arrow arrow-ep )
 
@@ -112,7 +118,7 @@ macro( build_arrow )
     set_target_properties( parquet
             PROPERTIES
                 IMPORTED_GLOBAL                 TRUE
-                IMPORTED_LOCATION               ${INSTALL_DIR}/lib/libparquet.a
+                IMPORTED_LOCATION               ${INSTALL_DIR}/${CMAKE_INSTALL_LIBDIR}/libparquet.a
                 INTERFACE_INCLUDE_DIRECTORIES   ${INSTALL_DIR}/include )
     add_dependencies(parquet arrow-ep)
     target_link_libraries(parquet INTERFACE arrow thrift utf8proc)

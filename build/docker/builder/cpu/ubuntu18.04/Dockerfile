@@ -12,7 +12,7 @@
 FROM milvusdb/openblas:ubuntu18.04-20210428
 
 RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates gnupg2 && \
-    wget -qO- "https://cmake.org/files/v3.14/cmake-3.14.3-Linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local && \
+    wget -qO- "https://cmake.org/files/v3.18/cmake-3.18.6-Linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local && \
     apt-get update && apt-get install -y --no-install-recommends \
     g++ gcc gfortran git make ccache libssl-dev zlib1g-dev libboost-regex-dev libboost-program-options-dev libboost-system-dev libboost-filesystem-dev libboost-serialization-dev python3-dev libboost-python-dev libcurl4-openssl-dev libtbb-dev clang-format-10 clang-tidy-10 lcov && \
     apt-get remove --purge -y && \
@@ -35,6 +35,8 @@ RUN mkdir -p /usr/local/go && wget -qO- "https://golang.org/dl/go1.15.2.linux-am
     go clean --modcache && \
     chmod -R 777 "$GOPATH" && chmod -R a+w $(go env GOTOOLDIR)
 
+RUN ln -s /go/bin/dlv /go/bin/dlv-dap
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdb gdbserver && \
     apt-get remove --purge -y && \
@@ -42,16 +44,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN echo 'root:root' | chpasswd
 
+# refer: https://code.visualstudio.com/docs/remote/containers-advanced#_avoiding-extension-reinstalls-on-container-rebuild
 RUN mkdir -p /home/milvus/.vscode-server/extensions \
         /home/milvus/.vscode-server-insiders/extensions \
     && chmod -R 777 /home/milvus
 
 COPY --chown=0:0 build/docker/builder/entrypoint.sh /
 
-RUN wget -qO- "https://github.com/benesch/autouseradd/releases/download/1.2.0/autouseradd-1.2.0-amd64.tar.gz" | tar xz -C / --strip-components 1
+RUN wget -qO- "https://github.com/jeffoverflow/autouseradd/releases/download/1.2.0/autouseradd-1.2.0-amd64.tar.gz" | tar xz -C / --strip-components 1
 
 RUN wget -O /tini https://github.com/krallin/tini/releases/download/v0.19.0/tini && \
     chmod +x /tini
 
-ENTRYPOINT [ "/tini", "--", "autouseradd", "--no-create-home", "--user", "milvus", "--", "/entrypoint.sh" ]
+ENTRYPOINT [ "/tini", "--", "autouseradd", "--user", "milvus", "--", "/entrypoint.sh" ]
 CMD ["tail", "-f", "/dev/null"]

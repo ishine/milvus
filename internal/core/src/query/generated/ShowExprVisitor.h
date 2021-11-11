@@ -13,8 +13,6 @@
 // Generated File
 // DO NOT EDIT
 #include "query/Plan.h"
-#include "exceptions/EasyAssert.h"
-#include "utils/Json.h"
 #include <utility>
 #include "ExprVisitor.h"
 
@@ -22,16 +20,22 @@ namespace milvus::query {
 class ShowExprVisitor : public ExprVisitor {
  public:
     void
-    visit(BoolUnaryExpr& expr) override;
+    visit(LogicalUnaryExpr& expr) override;
 
     void
-    visit(BoolBinaryExpr& expr) override;
+    visit(LogicalBinaryExpr& expr) override;
 
     void
     visit(TermExpr& expr) override;
 
     void
-    visit(RangeExpr& expr) override;
+    visit(UnaryRangeExpr& expr) override;
+
+    void
+    visit(BinaryRangeExpr& expr) override;
+
+    void
+    visit(CompareExpr& expr) override;
 
  public:
     using RetType = Json;
@@ -48,14 +52,14 @@ class ShowExprVisitor : public ExprVisitor {
     }
 
     Json
-    combine(Json&& extra, UnaryExpr& expr) {
+    combine(Json&& extra, UnaryExprBase& expr) {
         auto result = std::move(extra);
         result["child"] = call_child(*expr.child_);
         return result;
     }
 
     Json
-    combine(Json&& extra, BinaryExpr& expr) {
+    combine(Json&& extra, BinaryExprBase& expr) {
         auto result = std::move(extra);
         result["left_child"] = call_child(*expr.left_);
         result["right_child"] = call_child(*expr.right_);

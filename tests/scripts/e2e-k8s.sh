@@ -65,6 +65,10 @@ while (( "$#" )); do
     TEST_EXTRA_ARG=$2
     shift 2
     ;;
+    --test-timeout)
+    TEST_TIMEOUT=$2
+    shift 2
+    ;;
     --skip-setup)
       SKIP_SETUP=true
       shift
@@ -77,16 +81,20 @@ while (( "$#" )); do
       SKIP_CLEANUP=true
       shift
     ;;
-    --install-logger)
-      CRON_LOGGER_INSTALL=true
-      shift
-    ;;
     --skip-build)
       SKIP_BUILD=true
       shift
     ;;
+    --skip-build-image)
+      SKIP_BUILD_IMAGE=true
+      shift
+    ;;
     --skip-test)
       SKIP_TEST=true
+      shift
+    ;;
+    --skip-export-logs)
+      SKIP_EXPORT_LOGS=true
       shift
     ;;
     --manual)
@@ -130,7 +138,9 @@ Usage:
                                 Refer: https://helm.sh/docs/helm/helm_install/#helm-install
 
     --test-extra-arg            Run e2e test extra configuration
-                                For example, \"--tag=smoke\"
+                                For example, \"--tags=L0\"
+
+    --test-timeout              To specify timeout period of e2e test. Timeout time is specified in seconds.
 
     --topology                  KinD cluster topology of deployments
                                 Provides three classes: \"SINGLE_CLUSTER\", \"MULTICLUSTER_SINGLE_NETWORK\", \"MULTICLUSTER\"
@@ -144,9 +154,13 @@ Usage:
 
     --skip-cleanup              Skip cleanup KinD cluster
 
-    --skip-build                Skip build Milvus image
+    --skip-build                Skip build Milvus binary
+
+    --skip-build-image          Skip build Milvus image
 
     --skip-test                 Skip e2e test
+
+    --skip-export-logs          Skip kind export logs
 
     --manual                    Manual Mode
 
@@ -186,7 +200,7 @@ fi
 export PULL_POLICY=IfNotPresent
 
 # We run a local-registry in a docker container that KinD nodes pull from
-# These values are must match what is in config/trustworthy-jwt.yaml
+# These values must match what are in config/trustworthy-jwt.yaml
 export KIND_REGISTRY_NAME="kind-registry"
 export KIND_REGISTRY_PORT="5000"
 export KIND_REGISTRY="localhost:${KIND_REGISTRY_PORT}"
@@ -197,12 +211,6 @@ export SINGLE_CLUSTER_NAME="${SINGLE_CLUSTER_NAME:-kind}"
 export HUB="${HUB:-milvusdb}"
 export TAG="${TAG:-latest}"
 
-# If we're not intending to pull from an actual remote registry, use the local kind registry
-if [[ -z "${SKIP_BUILD:-}" ]]; then
-  HUB="${KIND_REGISTRY}"
-  export HUB
-fi
-
 export CI="true"
 
 if [[ ! -d "${ARTIFACTS}" ]];then
@@ -211,7 +219,7 @@ fi
 
 if [[ ! -x "$(command -v kind)" ]]; then
   KIND_DIR="${KIND_DIR:-"${HOME}/tool_cache/kind"}"
-  KIND_VERSION="v0.10.0"
+  KIND_VERSION="v0.11.1"
 
   export PATH="${KIND_DIR}:${PATH}"
   if [[ ! -x "$(command -v kind)" ]]; then
@@ -267,13 +275,24 @@ if [[ -z "${SKIP_SETUP:-}" ]]; then
 fi
 
 if [[ -z "${SKIP_BUILD:-}" ]]; then
-  export MILVUS_IMAGE_REPO="${HUB}/milvus"
-  export MILVUS_IMAGE_TAG="${TAG}"
-
   trace "setup kind registry" setup_kind_registry
   pushd "${ROOT}"
     trace "build milvus" "${ROOT}/build/builder.sh" /bin/bash -c "${BUILD_COMMAND}"
-    trace "build milvus image" docker build -f "${ROOT}/build/docker/milvus/Dockerfile" -t "${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}" .
+  popd
+fi
+
+if [[ -z "${SKIP_BUILD_IMAGE:-}" ]]; then
+  # If we're not intending to pull from an actual remote registry, use the local kind registry
+  running="$(docker inspect -f '{{.State.Running}}' "${KIND_REGISTRY_NAME}" 2>/dev/null || true)"
+  if [[ "${running}" == 'true' ]]; then
+    HUB="${KIND_REGISTRY}"
+    export HUB
+  fi
+  export MILVUS_IMAGE_REPO="${HUB}/milvus"
+  export MILVUS_IMAGE_TAG="${TAG}"
+
+  pushd "${ROOT}"
+    trace "build milvus image" "${ROOT}/build/build_image.sh"
     trace "push milvus image" docker push "${MILVUS_IMAGE_REPO}:${MILVUS_IMAGE_TAG}"
   popd
 fi
@@ -283,7 +302,12 @@ if [[ -z "${SKIP_INSTALL:-}" ]]; then
 fi
 
 if [[ -z "${SKIP_TEST:-}" ]]; then
-  trace "test" "${ROOT}/tests/scripts/e2e.sh" "${TEST_EXTRA_ARG}"
+  trace "prepare e2e test" "${ROOT}/tests/scripts/prepare_e2e.sh"
+  if [[ -n "${TEST_TIMEOUT:-}" ]]; then
+    trace "e2e test" "timeout" "-v" "${TEST_TIMEOUT}" "${ROOT}/tests/scripts/e2e.sh" "${TEST_EXTRA_ARG}"
+  else
+    trace "e2e test" "${ROOT}/tests/scripts/e2e.sh" "${TEST_EXTRA_ARG}"
+  fi
 fi
 
 # Check if the user is running the clusters in manual mode.

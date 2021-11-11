@@ -18,6 +18,7 @@
 #include "query/generated/ExecExprVisitor.h"
 #include "query/SearchOnGrowing.h"
 #include "query/SearchOnSealed.h"
+#include "boost_ext/dynamic_bitset_ext.hpp"
 
 namespace milvus::query {
 
@@ -27,7 +28,7 @@ namespace impl {
 // WILL BE USED BY GENERATOR UNDER suvlim/core_gen/
 class ExecPlanNodeVisitor : PlanNodeVisitor {
  public:
-    using RetType = QueryResult;
+    using RetType = SearchResult;
     ExecPlanNodeVisitor(const segcore::SegmentInterface& segment,
                         Timestamp timestamp,
                         const PlaceholderGroup& placeholder_group)
@@ -61,6 +62,17 @@ class ExecPlanNodeVisitor : PlanNodeVisitor {
 }  // namespace impl
 #endif
 
+static SearchResult
+empty_search_result(int64_t num_queries, int64_t topk, int64_t round_decimal, MetricType metric_type) {
+    SearchResult final_result;
+    SubSearchResult result(num_queries, topk, metric_type, round_decimal);
+    final_result.num_queries_ = num_queries;
+    final_result.topk_ = topk;
+    final_result.internal_seg_offsets_ = std::move(result.mutable_labels());
+    final_result.result_distances_ = std::move(result.mutable_values());
+    return final_result;
+}
+
 template <typename VectorType>
 void
 ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
@@ -73,20 +85,74 @@ ExecPlanNodeVisitor::VectorVisitorImpl(VectorPlanNode& node) {
     auto src_data = ph.get_blob<EmbeddedType<VectorType>>();
     auto num_queries = ph.num_of_queries_;
 
-    aligned_vector<uint8_t> bitset_holder;
+    boost::dynamic_bitset<> bitset_holder;
     BitsetView view;
     // TODO: add API to unify row_count
-    auto row_count = segment->get_row_count();
+    // auto row_count = segment->get_row_count();
+    auto active_count = segment->get_active_count(timestamp_);
 
-    if (node.predicate_.has_value()) {
-        ExecExprVisitor::RetType expr_ret = ExecExprVisitor(*segment, row_count).call_child(*node.predicate_.value());
-        bitset_holder = AssembleNegBitset(expr_ret);
-        view = BitsetView(bitset_holder.data(), bitset_holder.size() * 8);
+    // skip all calculation
+    if (active_count == 0) {
+        ret_ = empty_search_result(num_queries, node.search_info_.topk_, node.search_info_.round_decimal_,
+                                   node.search_info_.metric_type_);
+        return;
     }
 
-    segment->vector_search(row_count, node.query_info_, src_data, num_queries, view, ret);
+    if (node.predicate_.has_value()) {
+        ExecExprVisitor::RetType expr_ret =
+            ExecExprVisitor(*segment, active_count, timestamp_).call_child(*node.predicate_.value());
+        bitset_holder = std::move(expr_ret);
+    } else {
+        bitset_holder.resize(active_count, true);
+    }
+    segment->mask_with_timestamps(bitset_holder, timestamp_);
+
+    if (!bitset_holder.empty()) {
+        bitset_holder.flip();
+        view = BitsetView((uint8_t*)boost_ext::get_data(bitset_holder), bitset_holder.size());
+    }
+
+    auto final_bitset = segment->get_filtered_bitmap(view, active_count, MAX_TIMESTAMP);
+
+    segment->vector_search(active_count, node.search_info_, src_data, num_queries, MAX_TIMESTAMP, final_bitset, ret);
 
     ret_ = ret;
+}
+
+void
+ExecPlanNodeVisitor::visit(RetrievePlanNode& node) {
+    assert(!retrieve_ret_.has_value());
+    auto segment = dynamic_cast<const segcore::SegmentInternalInterface*>(&segment_);
+    AssertInfo(segment, "Support SegmentSmallIndex Only");
+    RetrieveRetType ret;
+
+    boost::dynamic_bitset<> bitset_holder;
+    auto active_count = segment->get_active_count(timestamp_);
+
+    if (active_count == 0) {
+        retrieve_ret_ = ret;
+        return;
+    }
+
+    if (node.predicate_ != nullptr) {
+        ExecExprVisitor::RetType expr_ret =
+            ExecExprVisitor(*segment, active_count, timestamp_).call_child(*(node.predicate_));
+        bitset_holder = std::move(expr_ret);
+    }
+
+    segment->mask_with_timestamps(bitset_holder, timestamp_);
+
+    BitsetView view;
+    if (!bitset_holder.empty()) {
+        bitset_holder.flip();
+        view = BitsetView((uint8_t*)boost_ext::get_data(bitset_holder), bitset_holder.size());
+    }
+
+    auto final_bitset = segment->get_filtered_bitmap(view, active_count, MAX_TIMESTAMP);
+
+    auto seg_offsets = std::move(segment->search_ids(final_bitset, MAX_TIMESTAMP));
+    ret.result_offsets_.assign((int64_t*)seg_offsets.data(), (int64_t*)seg_offsets.data() + seg_offsets.size());
+    retrieve_ret_ = ret;
 }
 
 void

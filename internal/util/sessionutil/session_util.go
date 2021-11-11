@@ -5,305 +5,384 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 
-	"github.com/coreos/etcd/mvcc/mvccpb"
-	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/util/retry"
-	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
-const defaultServiceRoot = "/services/"
-const defaultIDKey = "id"
-const defaultRetryTimes = 30
-const defaultTTL = 10
+const (
+	// DefaultServiceRoot default root path used in kv by Session
+	DefaultServiceRoot = "session/"
+	// DefaultIDKey default id key for Session
+	DefaultIDKey = "id"
+	// DefaultRetryTimes default retry times when registerService or getServerByID
+	DefaultRetryTimes = 30
+	// DefaultTTL default ttl value when granting a lease
+	DefaultTTL = 60
+)
+
+// SessionEventType session event type
+type SessionEventType int
+
+const (
+	// SessionNoneEvent place holder for zero value
+	SessionNoneEvent SessionEventType = iota
+	// SessionAddEvent event type for a new Session Added
+	SessionAddEvent
+	// SessionDelEvent event type for a Session deleted
+	SessionDelEvent
+)
 
 // Session is a struct to store service's session, including ServerID, ServerName,
 // Address.
-// LeaseID will be assigned after registered in etcd.
+// Exclusive indicates that this server can only start one.
 type Session struct {
-	ServerID   int64
-	ServerName string
-	Address    string
-	Exclusive  bool
-	LeaseID    clientv3.LeaseID
+	ctx context.Context
+	// When outside context done, Session cancels its goroutines first, then uses
+	// keepAliceCancel to cancel the etcd KeepAlive
+	keepAliveCancel context.CancelFunc
+
+	ServerID   int64  `json:"ServerID,omitempty"`
+	ServerName string `json:"ServerName,omitempty"`
+	Address    string `json:"Address,omitempty"`
+	Exclusive  bool   `json:"Exclusive,omitempty"`
+
+	liveCh  <-chan bool
+	etcdCli *clientv3.Client
+	leaseID clientv3.LeaseID
+
+	metaRoot string
 }
 
-var (
-	globalSessionManager = &SessionManager{}
-)
-
-// SessionManager is a struct to help store other service's session.
-// including ServerID, ServerName, Address.
-// It can fetch up-to-date sessions' information and watch service up and down.
-type SessionManager struct {
-	ctx    context.Context
-	etcdKV *etcdkv.EtcdKV
-
-	Self     *Session
-	Sessions sync.Map
-}
-
-// NewSession is a helper to build Session object.LeaseID will be assigned after
-// registeration.
-func NewSession(serverName, address string, exclusive bool) *Session {
-	return &Session{
-		ServerName: serverName,
-		Address:    address,
-		Exclusive:  exclusive,
+// NewSession is a helper to build Session object.
+// ServerID, ServerName, Address, Exclusive will be assigned after Init().
+// metaRoot is a path in etcd to save session information.
+// etcdEndpoints is to init etcdCli when NewSession
+func NewSession(ctx context.Context, metaRoot string, etcdEndpoints []string) *Session {
+	session := &Session{
+		ctx:      ctx,
+		metaRoot: metaRoot,
 	}
-}
 
-// NewSessionManager is a helper to build SessionManager object.
-func NewSessionManager(ctx context.Context, etcdAddress string, etcdPath string, self *Session) *SessionManager {
-	etcdKV, err := initEtcd(etcdAddress, etcdPath)
-	if err != nil {
+	connectEtcdFn := func() error {
+		log.Debug("Session try to connect to etcd")
+		etcdCli, err := clientv3.New(clientv3.Config{Endpoints: etcdEndpoints, DialTimeout: 5 * time.Second})
+		if err != nil {
+			return err
+		}
+		ctx2, cancel2 := context.WithTimeout(session.ctx, 5*time.Second)
+		defer cancel2()
+		if _, err = etcdCli.Get(ctx2, "health"); err != nil {
+			return err
+		}
+		session.etcdCli = etcdCli
 		return nil
 	}
-	return &SessionManager{
-		ctx:    ctx,
-		etcdKV: etcdKV,
-		Self:   self,
+	err := retry.Do(ctx, connectEtcdFn, retry.Attempts(300))
+	if err != nil {
+		log.Warn("failed to initialize session",
+			zap.Error(err))
+		return nil
 	}
+	log.Debug("Session connect to etcd success")
+	return session
 }
 
-// Init will initialize base struct in the SessionManager, including getServerID,
-// and process keepAliveResponse
-func (sm *SessionManager) Init() {
-	sm.checkIDExist()
-	serverID, err := sm.getServerID()
+// Init will initialize base struct of the Session, including ServerName, ServerID,
+// Address, Exclusive. ServerID is obtained in getServerID.
+// Finally it will process keepAliveResponse to keep alive with etcd.
+func (s *Session) Init(serverName, address string, exclusive bool) {
+	s.ServerName = serverName
+	s.Address = address
+	s.Exclusive = exclusive
+	s.checkIDExist()
+	serverID, err := s.getServerID()
 	if err != nil {
 		panic(err)
 	}
-	sm.Self.ServerID = serverID
-	ch, err := sm.registerService()
+	s.ServerID = serverID
+	ch, err := s.registerService()
 	if err != nil {
 		panic(err)
 	}
-	sm.processKeepAliveResponse(ch)
+	s.liveCh = s.processKeepAliveResponse(ch)
 }
 
-// NewSession is a helper to build Session object.LeaseID will be assigned after
-// registeration.
-func NewSessionWithID(serverID int64, serverName, address string, exclusive bool) *Session {
-	return &Session{
-		ServerID:   serverID,
-		ServerName: serverName,
-		Address:    address,
-		Exclusive:  exclusive,
-	}
+func (s *Session) getServerID() (int64, error) {
+	return s.getServerIDWithKey(DefaultIDKey, DefaultRetryTimes)
 }
 
-// GlobalServerID returns [singleton] ServerID.
-// Before SetGlobalServerID, GlobalServerID() returns -1
-func GlobalSessionManager() *SessionManager {
-	return globalSessionManager
+func (s *Session) checkIDExist() {
+	log.Debug("Session checkIDExist Begin")
+	s.etcdCli.Txn(s.ctx).If(
+		clientv3.Compare(
+			clientv3.Version(path.Join(s.metaRoot, DefaultServiceRoot, DefaultIDKey)),
+			"=",
+			0)).
+		Then(clientv3.OpPut(path.Join(s.metaRoot, DefaultServiceRoot, DefaultIDKey), "1")).Commit()
+	log.Debug("Session checkIDExist End")
 }
 
-// SetGlobalServerID sets the [singleton] ServerID. ServerID returned by
-// GlobalServerID(). Those who use GlobalServerID should call SetGlobalServerID()
-// as early as possible in main() before use ServerID.
-func SetGlobalSessionManager(sm *SessionManager) {
-	globalSessionManager = sm
-}
-
-// GetServerID gets id from etcd with key: metaRootPath + "/services/id"
-// Each server get ServerID and add one to id.
-func (sm *SessionManager) getServerID() (int64, error) {
-	return sm.getServerIDWithKey(defaultIDKey, defaultRetryTimes)
-}
-
-func (sm *SessionManager) checkIDExist() {
-	sm.etcdKV.CompareVersionAndSwap(defaultServiceRoot+defaultIDKey, 0, "1")
-}
-
-func (sm *SessionManager) getServerIDWithKey(key string, retryTimes int) (int64, error) {
-	res := int64(0)
-	getServerIDWithKeyFn := func() error {
-		value, err := sm.etcdKV.Load(defaultServiceRoot + key)
+func (s *Session) getServerIDWithKey(key string, retryTimes uint) (int64, error) {
+	for {
+		log.Debug("Session try to get serverID")
+		getResp, err := s.etcdCli.Get(s.ctx, path.Join(s.metaRoot, DefaultServiceRoot, key))
 		if err != nil {
-			return nil
+			log.Debug("Session get etcd key error", zap.String("key", key), zap.Error(err))
+			return -1, err
 		}
+		if getResp.Count <= 0 {
+			log.Debug("Session there is no value", zap.String("key", key))
+			continue
+		}
+		value := string(getResp.Kvs[0].Value)
 		valueInt, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			log.Debug("session", zap.Error(err))
-			return err
+			log.Debug("Session ParseInt error", zap.String("value", value), zap.Error(err))
+			continue
 		}
-		err = sm.etcdKV.CompareValueAndSwap(defaultServiceRoot+key, value,
-			strconv.FormatInt(valueInt+1, 10))
+		txnResp, err := s.etcdCli.Txn(s.ctx).If(
+			clientv3.Compare(
+				clientv3.Value(path.Join(s.metaRoot, DefaultServiceRoot, key)),
+				"=",
+				value)).
+			Then(clientv3.OpPut(path.Join(s.metaRoot, DefaultServiceRoot, key), strconv.FormatInt(valueInt+1, 10))).Commit()
 		if err != nil {
-			log.Debug("session", zap.Error(err))
-			return err
+			log.Debug("Session Txn failed", zap.String("key", key), zap.Error(err))
+			return -1, err
 		}
-		res = valueInt
-		return nil
-	}
 
-	err := retry.Retry(retryTimes, time.Millisecond*200, getServerIDWithKeyFn)
-	return res, err
+		if !txnResp.Succeeded {
+			log.Debug("Session Txn unsuccessful", zap.String("key", key))
+			continue
+		}
+		log.Debug("Session get serverID success")
+		return valueInt, nil
+	}
 }
 
-// RegisterService registers the service to etcd so that other services
+// registerService registers the service to etcd so that other services
 // can find that the service is online and issue subsequent operations
 // RegisterService will save a key-value in etcd
 // key: metaRootPath + "/services" + "/ServerName-ServerID"
 // value: json format
 // {
-//     "ServerID": "ServerID",
-//     "ServerName": "ServerName",
-//     "Address": "ip:port",
-//     "LeaseID": "LeaseID",
+//   ServerID   int64  `json:"ServerID,omitempty"`
+//	 ServerName string `json:"ServerName,omitempty"`
+//	 Address    string `json:"Address,omitempty"`
+//   Exclusive  bool   `json:"Exclusive,omitempty"`
 // }
-// MetaRootPath is configurable in the config file.
 // Exclusive means whether this service can exist two at the same time, if so,
 // it is false. Otherwise, set it to true.
-func (sm *SessionManager) registerService() (<-chan *clientv3.LeaseKeepAliveResponse, error) {
-	respID, err := sm.etcdKV.Grant(defaultTTL)
-	if err != nil {
-		log.Error("register service", zap.Error(err))
-		return nil, err
-	}
-	sm.Self.LeaseID = respID
+func (s *Session) registerService() (<-chan *clientv3.LeaseKeepAliveResponse, error) {
+	var ch <-chan *clientv3.LeaseKeepAliveResponse
+	log.Debug("Session Register Begin")
+	registerFn := func() error {
+		resp, err := s.etcdCli.Grant(s.ctx, DefaultTTL)
+		if err != nil {
+			log.Error("register service", zap.Error(err))
+			return err
+		}
+		s.leaseID = resp.ID
 
-	sessionJSON, err := json.Marshal(sm.Self)
-	if err != nil {
-		return nil, err
-	}
+		sessionJSON, err := json.Marshal(s)
+		if err != nil {
+			return err
+		}
 
-	key := defaultServiceRoot + sm.Self.ServerName
-	if !sm.Self.Exclusive {
-		key = key + "-" + strconv.FormatInt(sm.Self.ServerID, 10)
-	}
-	err = sm.etcdKV.CompareVersionAndSwap(key, 0, string(sessionJSON), clientv3.WithLease(respID))
-	if err != nil {
-		fmt.Printf("compare and swap error %s\n. maybe the key has registered", err)
-		return nil, err
-	}
+		key := s.ServerName
+		if !s.Exclusive {
+			key = key + "-" + strconv.FormatInt(s.ServerID, 10)
+		}
+		txnResp, err := s.etcdCli.Txn(s.ctx).If(
+			clientv3.Compare(
+				clientv3.Version(path.Join(s.metaRoot, DefaultServiceRoot, key)),
+				"=",
+				0)).
+			Then(clientv3.OpPut(path.Join(s.metaRoot, DefaultServiceRoot, key), string(sessionJSON), clientv3.WithLease(resp.ID))).Commit()
 
-	ch, err := sm.etcdKV.KeepAlive(respID)
+		if err != nil {
+			log.Warn("compare and swap error, maybe the key has ben registered", zap.Error(err))
+			return err
+		}
+
+		if !txnResp.Succeeded {
+			return fmt.Errorf("function CompareAndSwap error for compare is false for key: %s", key)
+		}
+
+		keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())
+		s.keepAliveCancel = keepAliveCancel
+		ch, err = s.etcdCli.KeepAlive(keepAliveCtx, resp.ID)
+		if err != nil {
+			fmt.Printf("keep alive error %s\n", err)
+			return err
+		}
+		log.Debug("Session Register End", zap.Int64("ServerID", s.ServerID))
+		return nil
+	}
+	err := retry.Do(s.ctx, registerFn, retry.Attempts(DefaultRetryTimes), retry.Sleep(500*time.Millisecond))
 	if err != nil {
-		fmt.Printf("keep alive error %s\n", err)
 		return nil, err
 	}
 	return ch, nil
 }
 
-// ProcessKeepAliveResponse processes the response of etcd keepAlive interface
+// processKeepAliveResponse processes the response of etcd keepAlive interface
 // If keepAlive fails for unexpected error, it will send a signal to the channel.
-func (sm *SessionManager) processKeepAliveResponse(ch <-chan *clientv3.LeaseKeepAliveResponse) {
+func (s *Session) processKeepAliveResponse(ch <-chan *clientv3.LeaseKeepAliveResponse) (failChannel <-chan bool) {
+	failCh := make(chan bool)
 	go func() {
 		for {
 			select {
-			case <-sm.ctx.Done():
-				log.Error("keep alive", zap.Error(errors.New("context done")))
+			case <-s.ctx.Done():
+				log.Warn("keep alive", zap.Error(errors.New("context done")))
+				if s.keepAliveCancel != nil {
+					s.keepAliveCancel()
+				}
 				return
 			case resp, ok := <-ch:
 				if !ok {
-					panic("keepAlive with etcd failed")
+					log.Warn("session keepalive channel closed")
+					close(failCh)
+					return
 				}
 				if resp == nil {
-					panic("keepAlive with etcd failed")
+					log.Warn("session keepalive response failed")
+					close(failCh)
+					return
 				}
+				//failCh <- true
 			}
 		}
 	}()
+	return failCh
 }
 
-// UpdateSessions will update local sessions same as the sessions saved in etcd.
-// It makes locally stored sessions up-to-date.
-func (sm *SessionManager) UpdateSessions(prefix string) error {
-	resKey, resValue, err := sm.etcdKV.LoadWithPrefix(defaultServiceRoot + prefix)
+// GetSessions will get all sessions registered in etcd.
+// Revision is returned for WatchServices to prevent key events from being missed.
+func (s *Session) GetSessions(prefix string) (map[string]*Session, int64, error) {
+	res := make(map[string]*Session)
+	key := path.Join(s.metaRoot, DefaultServiceRoot, prefix)
+	resp, err := s.etcdCli.Get(s.ctx, key, clientv3.WithPrefix(),
+		clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	for i := 0; i < len(resKey); i++ {
+	log.Debug("SessionUtil GetSessions", zap.Any("prefix", prefix), zap.Any("resp", resp))
+	for _, kv := range resp.Kvs {
 		session := &Session{}
-		err = json.Unmarshal([]byte(resValue[i]), session)
+		err = json.Unmarshal(kv.Value, session)
 		if err != nil {
-			return err
+			return nil, 0, err
 		}
-		sm.Sessions.Store(resKey[i], session)
+		_, mapKey := path.Split(string(kv.Key))
+		res[mapKey] = session
 	}
-	return nil
+	return res, resp.Header.Revision, nil
 }
 
-// GetSessions gets all the services saved in memory.
-// Before GetSessions, you should WatchServices or UpdateSessions first.
-func (sm *SessionManager) GetSessions(prefix string) map[string]*Session {
-	sessions := map[string]*Session{}
-	sm.Sessions.Range(func(key, value interface{}) bool {
-		if strings.Contains(fmt.Sprint(key), prefix) {
-			sessions[fmt.Sprint(key)] = value.(*Session)
-		}
-		return true
-	})
-	return sessions
+// SessionEvent indicates the changes of other servers.
+// if a server is up, EventType is SessAddEvent.
+// if a server is down, EventType is SessDelEvent.
+// Session Saves the changed server's information.
+type SessionEvent struct {
+	EventType SessionEventType
+	Session   *Session
 }
 
-// WatchServices watch the service's up and down in etcd, and saves it into local
-// sessions. If a server up, it will be add to sessions. But it won't get the
-// sessions startup before watch start.
-// UpdateSessions and WatchServices is recommended.
-func (sm *SessionManager) WatchServices(ctx context.Context, prefix string) (addChannel <-chan *Session, delChannel <-chan *Session) {
-	addCh := make(chan *Session, 10)
-	delCh := make(chan *Session, 10)
-	rch := sm.etcdKV.WatchWithPrefix(defaultServiceRoot + prefix)
+// WatchServices watch the service's up and down in etcd, and send event to
+// eventChannel.
+// prefix is a parameter to know which service to watch and can be obtained in
+// typeutil.type.go.
+// revision is a etcd reversion to prevent missing key events and can be obtained
+// in GetSessions.
+// If a server up, a event will be add to channel with eventType SessionAddType.
+// If a server down, a event will be add to channel with eventType SessionDelType.
+func (s *Session) WatchServices(prefix string, revision int64) (eventChannel <-chan *SessionEvent) {
+	eventCh := make(chan *SessionEvent, 100)
+	rch := s.etcdCli.Watch(s.ctx, path.Join(s.metaRoot, DefaultServiceRoot, prefix), clientv3.WithPrefix(), clientv3.WithPrevKV(), clientv3.WithRev(revision))
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
+			case <-s.ctx.Done():
 				return
 			case wresp, ok := <-rch:
 				if !ok {
 					return
 				}
+				if wresp.Err() != nil {
+					//close event channel
+					log.Warn("Watch service found error", zap.Error(wresp.Err()))
+					close(eventCh)
+					return
+				}
 				for _, ev := range wresp.Events {
+					session := &Session{}
+					var eventType SessionEventType
 					switch ev.Type {
 					case mvccpb.PUT:
 						log.Debug("watch services",
 							zap.Any("add kv", ev.Kv))
-						session := &Session{}
 						err := json.Unmarshal([]byte(ev.Kv.Value), session)
 						if err != nil {
 							log.Error("watch services", zap.Error(err))
 							continue
 						}
-						sm.Sessions.Store(string(ev.Kv.Key), session)
-						addCh <- session
+						eventType = SessionAddEvent
 					case mvccpb.DELETE:
 						log.Debug("watch services",
-							zap.Any("delete kv", ev.Kv))
-						value, isloaded := sm.Sessions.LoadAndDelete(string(ev.Kv.Key))
-						if isloaded {
-							delCh <- value.(*Session)
+							zap.Any("delete kv", ev.PrevKv))
+						err := json.Unmarshal([]byte(ev.PrevKv.Value), session)
+						if err != nil {
+							log.Error("watch services", zap.Error(err))
+							continue
 						}
+						eventType = SessionDelEvent
+					}
+					log.Debug("WatchService", zap.Any("event type", eventType))
+					eventCh <- &SessionEvent{
+						EventType: eventType,
+						Session:   session,
 					}
 				}
 
 			}
 		}
 	}()
-	return addCh, delCh
+	return eventCh
 }
 
-func initEtcd(etcdAddress, rootPath string) (*etcdkv.EtcdKV, error) {
-	var etcdKV *etcdkv.EtcdKV
-	connectEtcdFn := func() error {
-		etcdCli, err := clientv3.New(clientv3.Config{Endpoints: []string{etcdAddress}, DialTimeout: 5 * time.Second})
-		if err != nil {
-			return err
+// LivenessCheck performs liveness check with provided context and channel
+// ctx controls the liveness check loop
+// ch is the liveness signal channel, ch is closed only when the session is expired
+// callback is the function to call when ch is closed, note that callback will not be invoked when loop exits due to context
+func (s *Session) LivenessCheck(ctx context.Context, callback func()) {
+	for {
+		select {
+		case _, ok := <-s.liveCh:
+			// ok, still alive
+			if ok {
+				continue
+			}
+			// not ok, connection lost
+			log.Warn("connection lost detected, shuting down")
+			if callback != nil {
+				go callback()
+			}
+			return
+		case <-ctx.Done():
+			log.Debug("liveness exits due to context done")
+			// cancel the etcd keepAlive context
+			if s.keepAliveCancel != nil {
+				s.keepAliveCancel()
+			}
+			return
 		}
-		etcdKV = etcdkv.NewEtcdKV(etcdCli, rootPath)
-		return nil
 	}
-	err := retry.Retry(100000, time.Millisecond*200, connectEtcdFn)
-	if err != nil {
-		return nil, err
-	}
-	return etcdKV, nil
 }

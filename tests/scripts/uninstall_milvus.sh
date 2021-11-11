@@ -11,6 +11,7 @@
 # is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 # or implied. See the License for the specific language governing permissions and limitations under the License.
 
+# Exit immediately for non zero status
 set -e
 set -x
 
@@ -19,5 +20,9 @@ MILVUS_HELM_NAMESPACE="${MILVUS_HELM_NAMESPACE:-default}"
 
 helm uninstall -n "${MILVUS_HELM_NAMESPACE}" "${MILVUS_HELM_RELEASE_NAME}"
 
-MILVUS_LABELS="app.kubernetes.io/instance=${MILVUS_HELM_RELEASE_NAME}"
-kubectl delete pvc -n "${MILVUS_HELM_NAMESPACE}" $(kubectl get pvc -n "${MILVUS_HELM_NAMESPACE}" -l "${MILVUS_LABELS}" -o jsonpath='{range.items[*]}{.metadata.name} ')
+MILVUS_LABELS1="app.kubernetes.io/instance=${MILVUS_HELM_RELEASE_NAME}"
+MILVUS_LABELS2="release=${MILVUS_HELM_RELEASE_NAME}"
+
+# Clean up pvc
+kubectl delete pvc -n "${MILVUS_HELM_NAMESPACE}" $(kubectl get pvc -n "${MILVUS_HELM_NAMESPACE}" -l "${MILVUS_LABELS1}" -o jsonpath='{range.items[*]}{.metadata.name} ') || true
+kubectl delete pvc -n "${MILVUS_HELM_NAMESPACE}" $(kubectl get pvc -n "${MILVUS_HELM_NAMESPACE}" -l "${MILVUS_LABELS2}" -o jsonpath='{range.items[*]}{.metadata.name} ') || true

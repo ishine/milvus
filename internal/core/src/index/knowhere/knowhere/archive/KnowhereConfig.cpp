@@ -9,61 +9,58 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License.
 
+#include <string>
+
 #include "KnowhereConfig.h"
+#include "NGT/lib/NGT/defines.h"
+#include "faiss/Clustering.h"
+#include "faiss/FaissHook.h"
+#include "faiss/common.h"
+#include "faiss/utils/distances.h"
+#include "faiss/utils/utils.h"
+#include "knowhere/common/Exception.h"
+#include "knowhere/common/Log.h"
+#include "knowhere/index/vector_index/IndexHNSW.h"
 #ifdef MILVUS_GPU_VERSION
 #include "knowhere/index/vector_index/helpers/FaissGpuResourceMgr.h"
 #endif
-#include <faiss/Clustering.h>
-#include <faiss/utils/distances.h>
-
-#include "NGT/lib/NGT/defines.h"
-#include "faiss/FaissHook.h"
-#include "faiss/common.h"
-#include "faiss/utils/utils.h"
-#include "knowhere/common/Log.h"
-#include "knowhere/index/IndexType.h"
-#include "knowhere/index/vector_index/IndexHNSW.h"
-#include "knowhere/index/vector_index/helpers/FaissIO.h"
-#include "utils/ConfigUtils.h"
-#include "utils/Error.h"
-#include "utils/Log.h"
-
-#include <string>
-#include <vector>
 
 namespace milvus {
 namespace engine {
 
 constexpr int64_t M_BYTE = 1024 * 1024;
 
-Status
+std::string
 KnowhereConfig::SetSimdType(const SimdType simd_type) {
-    if (simd_type == SimdType::AVX512) {
+    if (simd_type == SimdType::AUTO) {
         faiss::faiss_use_avx512 = true;
-        faiss::faiss_use_avx2 = false;
-        faiss::faiss_use_sse = false;
+        faiss::faiss_use_avx2 = true;
+        faiss::faiss_use_sse4_2 = true;
+        LOG_KNOWHERE_DEBUG_ << "FAISS expect simdType::AUTO";
+    } else if (simd_type == SimdType::AVX512) {
+        faiss::faiss_use_avx512 = true;
+        faiss::faiss_use_avx2 = true;
+        faiss::faiss_use_sse4_2 = true;
+        LOG_KNOWHERE_DEBUG_ << "FAISS expect simdType::AVX512";
     } else if (simd_type == SimdType::AVX2) {
         faiss::faiss_use_avx512 = false;
         faiss::faiss_use_avx2 = true;
-        faiss::faiss_use_sse = false;
-    } else if (simd_type == SimdType::SSE) {
+        faiss::faiss_use_sse4_2 = true;
+        LOG_KNOWHERE_DEBUG_ << "FAISS expect simdType::AVX2";
+    } else if (simd_type == SimdType::SSE4_2) {
         faiss::faiss_use_avx512 = false;
         faiss::faiss_use_avx2 = false;
-        faiss::faiss_use_sse = true;
-    } else {
-        faiss::faiss_use_avx512 = true;
-        faiss::faiss_use_avx2 = true;
-        faiss::faiss_use_sse = true;
+        faiss::faiss_use_sse4_2 = true;
+        LOG_KNOWHERE_DEBUG_ << "FAISS expect simdType::SSE4_2";
     }
 
     std::string cpu_flag;
     if (faiss::hook_init(cpu_flag)) {
-        std::cout << "FAISS hook " << cpu_flag << std::endl;
-        LOG_ENGINE_DEBUG_ << "FAISS hook " << cpu_flag;
-        return Status::OK();
+        LOG_KNOWHERE_DEBUG_ << "FAISS hook " << cpu_flag;
+        return cpu_flag;
     }
 
-    return Status(KNOWHERE_UNEXPECTED_ERROR, "FAISS hook fail, CPU not supported!");
+    KNOWHERE_THROW_MSG("FAISS hook fail, CPU not supported!");
 }
 
 void

@@ -13,7 +13,10 @@ package typeutil
 
 import "github.com/milvus-io/milvus/internal/proto/commonpb"
 
-func CompareIndexParams(indexParam1 []*commonpb.KeyValuePair, indexParam2 []*commonpb.KeyValuePair) bool {
+// CompareIndexParams compares indexParam1 with indexParam2. When all keys of indexParam1 exist in indexParam2,
+// and the corresponding value are the same as in indexParam2, return true
+// Otherwise return false
+func CompareIndexParams(indexParam1, indexParam2 []*commonpb.KeyValuePair) bool {
 	if indexParam1 == nil && indexParam2 == nil {
 		return true
 	}
@@ -34,10 +37,7 @@ func CompareIndexParams(indexParam1 []*commonpb.KeyValuePair, indexParam2 []*com
 	}
 
 	for k, v := range paramMap1 {
-		if _, ok := paramMap2[k]; !ok {
-			return false
-		}
-		if v != paramMap2[k] {
+		if _, ok := paramMap2[k]; !ok || v != paramMap2[k] {
 			return false
 		}
 	}

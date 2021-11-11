@@ -11,8 +11,10 @@
 #pragma once
 #include <memory>
 
-#include "SegmentInterface.h"
+#include "segcore/SegmentInterface.h"
+#include "pb/segcore.pb.h"
 #include "common/LoadInfo.h"
+#include <utility>
 
 namespace milvus::segcore {
 
@@ -21,7 +23,11 @@ class SegmentSealed : public SegmentInternalInterface {
     virtual void
     LoadIndex(const LoadIndexInfo& info) = 0;
     virtual void
+    LoadSegmentMeta(const milvus::proto::segcore::LoadSegmentMeta& meta) = 0;
+    virtual void
     LoadFieldData(const LoadFieldDataInfo& info) = 0;
+    virtual void
+    LoadDeletedRecord(const LoadDeletedRecordInfo& info) = 0;
     virtual void
     DropIndex(const FieldId field_id) = 0;
     virtual void

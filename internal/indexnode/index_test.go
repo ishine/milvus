@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package indexnode
 
@@ -40,10 +45,11 @@ const (
 	IndexNGTONNG   = "NGT_ONNG"
 
 	// metric type
-	L2      = "L2"
-	IP      = "IP"
-	hamming = "HAMMING"
-	Jaccard = "JACCARD"
+	L2       = "L2"
+	IP       = "IP"
+	hamming  = "HAMMING"
+	Jaccard  = "JACCARD"
+	tanimoto = "TANIMOTO"
 
 	dim            = 8
 	nlist          = 100
@@ -100,6 +106,7 @@ func generateBinaryVectorTestCases() []testCase {
 	return []testCase{
 		{IndexFaissBinIVFFlat, Jaccard, true},
 		{IndexFaissBinIVFFlat, hamming, true},
+		{IndexFaissBinIVFFlat, tanimoto, true},
 		{IndexFaissBinIDMap, Jaccard, true},
 		{IndexFaissBinIDMap, hamming, true},
 	}
@@ -317,4 +324,37 @@ func TestCIndex_Delete(t *testing.T) {
 		err = index.Delete()
 		assert.Equal(t, err, nil)
 	}
+}
+
+func TestCIndex_Error(t *testing.T) {
+	indexPtr, err := NewCIndex(nil, nil)
+	assert.Nil(t, err)
+
+	t.Run("Serialize error", func(t *testing.T) {
+		blobs, err := indexPtr.Serialize()
+		assert.NotNil(t, err)
+		assert.Nil(t, blobs)
+	})
+
+	t.Run("Load error", func(t *testing.T) {
+		blobs := []*Blob{{
+			Key:   "test",
+			Value: []byte("value"),
+		},
+		}
+		err = indexPtr.Load(blobs)
+		assert.NotNil(t, err)
+	})
+
+	t.Run("BuildFloatVecIndexWithoutIds error", func(t *testing.T) {
+		floatVectors := []float32{1.1, 2.2, 3.3}
+		err = indexPtr.BuildFloatVecIndexWithoutIds(floatVectors)
+		assert.NotNil(t, err)
+	})
+
+	t.Run("BuildBinaryVecIndexWithoutIds error", func(t *testing.T) {
+		binaryVectors := []byte("binaryVectors")
+		err = indexPtr.BuildBinaryVecIndexWithoutIds(binaryVectors)
+		assert.NotNil(t, err)
+	})
 }

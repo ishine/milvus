@@ -15,9 +15,12 @@
 
 #include "query/SearchOnSealed.h"
 #include <knowhere/index/vector_index/VecIndex.h>
+#include "knowhere/index/vector_index/ConfAdapter.h"
+#include "knowhere/index/vector_index/ConfAdapterMgr.h"
 #include "knowhere/index/vector_index/helpers/IndexParameter.h"
 #include "knowhere/index/vector_index/adapter/VectorAdapter.h"
 #include <boost_ext/dynamic_bitset_ext.hpp>
+#include <cmath>
 
 namespace milvus::query {
 
@@ -41,7 +44,7 @@ AssembleNegBitset(const BitsetSimple& bitset_simple) {
         auto acc_byte_count = 0;
         for (auto& bitset : bitset_simple) {
             auto size = bitset.size();
-            Assert(size % 8 == 0);
+            AssertInfo(size % 8 == 0, "[AssembleNegBitset]Bitset size isn't times of 8");
             auto byte_count = size / 8;
             auto src_ptr = boost_ext::get_data(bitset);
             memcpy(result.data() + acc_byte_count, src_ptr, byte_count);
@@ -56,59 +59,58 @@ AssembleNegBitset(const BitsetSimple& bitset_simple) {
     return result;
 }
 
-// TODO: temporary fix
-// remove this when internal destructor bug is fix
-static void
-ReleaseQueryResult(const knowhere::DatasetPtr& result) {
-    float* res_dist = result->Get<float*>(knowhere::meta::DISTANCE);
-    free(res_dist);
-
-    int64_t* res_ids = result->Get<int64_t*>(knowhere::meta::IDS);
-    free(res_ids);
-}
-
 void
 SearchOnSealed(const Schema& schema,
                const segcore::SealedIndexingRecord& record,
-               const QueryInfo& query_info,
+               const SearchInfo& search_info,
                const void* query_data,
                int64_t num_queries,
                const faiss::BitsetView& bitset,
-               QueryResult& result) {
-    auto topK = query_info.topK_;
+               SearchResult& result) {
+    auto topk = search_info.topk_;
+    auto round_decimal = search_info.round_decimal_;
 
-    auto field_offset = query_info.field_offset_;
+    auto field_offset = search_info.field_offset_;
     auto& field = schema[field_offset];
     // Assert(field.get_data_type() == DataType::VECTOR_FLOAT);
     auto dim = field.get_dim();
 
-    Assert(record.is_ready(field_offset));
+    AssertInfo(record.is_ready(field_offset), "[SearchOnSealed]Record isn't ready");
     auto field_indexing = record.get_field_indexing(field_offset);
-    Assert(field_indexing->metric_type_ == query_info.metric_type_);
+    AssertInfo(field_indexing->metric_type_ == search_info.metric_type_,
+               "Metric type of field index isn't the same with search info");
 
     auto final = [&] {
         auto ds = knowhere::GenDataset(num_queries, dim, query_data);
 
-        auto conf = query_info.search_params_;
-        conf[milvus::knowhere::meta::TOPK] = query_info.topK_;
+        auto conf = search_info.search_params_;
+        conf[milvus::knowhere::meta::TOPK] = search_info.topk_;
         conf[milvus::knowhere::Metric::TYPE] = MetricTypeToName(field_indexing->metric_type_);
+        auto index_type = field_indexing->indexing_->index_type();
+        auto adapter = milvus::knowhere::AdapterMgr::GetInstance().GetAdapter(index_type);
+        AssertInfo(adapter->CheckSearch(conf, index_type, field_indexing->indexing_->index_mode()),
+                   "[SearchOnSealed]Search params check failed");
         return field_indexing->indexing_->Query(ds, conf, bitset);
     }();
 
     auto ids = final->Get<idx_t*>(knowhere::meta::IDS);
     auto distances = final->Get<float*>(knowhere::meta::DISTANCE);
 
-    auto total_num = num_queries * topK;
+    auto total_num = num_queries * topk;
+
+    const float multiplier = pow(10.0, round_decimal);
+    if (round_decimal != -1) {
+        const float multiplier = pow(10.0, round_decimal);
+        for (int i = 0; i < total_num; i++) {
+            distances[i] = round(distances[i] * multiplier) / multiplier;
+        }
+    }
     result.internal_seg_offsets_.resize(total_num);
     result.result_distances_.resize(total_num);
     result.num_queries_ = num_queries;
-    result.topK_ = topK;
+    result.topk_ = topk;
 
     std::copy_n(ids, total_num, result.internal_seg_offsets_.data());
     std::copy_n(distances, total_num, result.result_distances_.data());
-
-    // TODO: temporary fix
-    // remove this when internal destructor bug is fix
-    ReleaseQueryResult(final);
 }
 }  // namespace milvus::query

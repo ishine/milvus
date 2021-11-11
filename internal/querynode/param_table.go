@@ -12,28 +12,41 @@
 package querynode
 
 import (
-	"fmt"
 	"os"
-	"path"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/util/metricsinfo"
 	"github.com/milvus-io/milvus/internal/util/paramtable"
 )
 
+// ParamTable is used to record configuration items.
 type ParamTable struct {
 	paramtable.BaseTable
 
 	PulsarAddress string
-	EtcdAddress   string
+	RocksmqPath   string
+	EtcdEndpoints []string
 	MetaRootPath  string
 
-	QueryNodeIP              string
-	QueryNodePort            int64
-	QueryNodeID              UniqueID
-	QueryNodeNum             int
+	Alias         string
+	QueryNodeIP   string
+	QueryNodePort int64
+	QueryNodeID   UniqueID
+	// TODO: remove cacheSize
+	CacheSize   int64 // deprecated
+	InContainer bool
+
+	// channel prefix
+	ClusterChannelPrefix     string
 	QueryTimeTickChannelName string
+	StatsChannelName         string
+	MsgChannelSubName        string
 
 	FlowGraphMaxQueueLength int32
 	FlowGraphMaxParallelism int32
@@ -52,98 +65,117 @@ type ParamTable struct {
 	SearchPulsarBufSize        int64
 	SearchResultReceiveBufSize int64
 
+	// Retrieve
+	RetrieveChannelNames         []string
+	RetrieveResultChannelNames   []string
+	RetrieveReceiveBufSize       int64
+	RetrievePulsarBufSize        int64
+	RetrieveResultReceiveBufSize int64
+
 	// stats
 	StatsPublishInterval int
-	StatsChannelName     string
 
-	GracefulTime      int64
-	MsgChannelSubName string
-	SliceIndex        int
+	GracefulTime int64
+	SliceIndex   int
 
-	Log log.Config
+	// segcore
+	ChunkRows int64
+	SimdType  string
+
+	CreatedTime time.Time
+	UpdatedTime time.Time
+
+	// recovery
+	skipQueryChannelRecovery bool
 }
 
+// Params is a package scoped variable of type ParamTable.
 var Params ParamTable
 var once sync.Once
 
-func (p *ParamTable) Init() {
+// InitAlias initializes an alias for the QueryNode role.
+func (p *ParamTable) InitAlias(alias string) {
+	p.Alias = alias
+}
+
+// InitOnce is used to initialize configuration items, and it will only be called once.
+func (p *ParamTable) InitOnce() {
 	once.Do(func() {
-		p.BaseTable.Init()
-		err := p.LoadYaml("advanced/query_node.yaml")
-		if err != nil {
-			panic(err)
-		}
-
-		queryNodeIDStr := os.Getenv("QUERY_NODE_ID")
-		if queryNodeIDStr == "" {
-			queryNodeIDList := p.QueryNodeIDList()
-			if len(queryNodeIDList) <= 0 {
-				queryNodeIDStr = "0"
-			} else {
-				queryNodeIDStr = strconv.Itoa(int(queryNodeIDList[0]))
-			}
-		}
-
-		err = p.Save("_queryNodeID", queryNodeIDStr)
-		if err != nil {
-			panic(err)
-		}
-
-		p.initQueryNodeID()
-		p.initQueryNodeNum()
-		//p.initQueryTimeTickChannelName()
-
-		p.initMinioEndPoint()
-		p.initMinioAccessKeyID()
-		p.initMinioSecretAccessKey()
-		p.initMinioUseSSLStr()
-		p.initMinioBucketName()
-
-		p.initPulsarAddress()
-		p.initEtcdAddress()
-		p.initMetaRootPath()
-
-		p.initGracefulTime()
-		p.initMsgChannelSubName()
-		p.initSliceIndex()
-
-		p.initFlowGraphMaxQueueLength()
-		p.initFlowGraphMaxParallelism()
-
-		p.initSearchReceiveBufSize()
-		p.initSearchPulsarBufSize()
-		p.initSearchResultReceiveBufSize()
-
-		p.initStatsPublishInterval()
-		//p.initStatsChannelName()
-
-		p.initLogCfg()
+		p.Init()
 	})
 }
 
-// ---------------------------------------------------------- query node
-func (p *ParamTable) initQueryNodeID() {
-	queryNodeID, err := p.Load("_queryNodeID")
+// Init is used to initialize configuration items.
+func (p *ParamTable) Init() {
+	p.BaseTable.Init()
+
+	p.initCacheSize()
+	p.initInContainer()
+
+	p.initMinioEndPoint()
+	p.initMinioAccessKeyID()
+	p.initMinioSecretAccessKey()
+	p.initMinioUseSSLStr()
+	p.initMinioBucketName()
+
+	p.initPulsarAddress()
+	p.initRocksmqPath()
+	p.initEtcdEndpoints()
+	p.initMetaRootPath()
+
+	p.initGracefulTime()
+
+	p.initFlowGraphMaxQueueLength()
+	p.initFlowGraphMaxParallelism()
+
+	p.initSearchReceiveBufSize()
+	p.initSearchPulsarBufSize()
+	p.initSearchResultReceiveBufSize()
+
+	// Has to init global msgchannel prefix before other channel names
+	p.initClusterMsgChannelPrefix()
+	p.initQueryTimeTickChannelName()
+	p.initStatsChannelName()
+	p.initMsgChannelSubName()
+
+	p.initStatsPublishInterval()
+
+	p.initSegcoreChunkRows()
+	p.initKnowhereSimdType()
+
+	p.initRoleName()
+
+	p.initSkipQueryChannelRecovery()
+}
+
+func (p *ParamTable) initCacheSize() {
+	defer log.Debug("init cacheSize", zap.Any("cacheSize (GB)", p.CacheSize))
+
+	const defaultCacheSize = 32 // GB
+	p.CacheSize = defaultCacheSize
+
+	var err error
+	cacheSize := os.Getenv("CACHE_SIZE")
+	if cacheSize == "" {
+		cacheSize, err = p.Load("queryNode.cacheSize")
+		if err != nil {
+			return
+		}
+	}
+	value, err := strconv.ParseInt(cacheSize, 10, 64)
+	if err != nil {
+		return
+	}
+	p.CacheSize = value
+}
+
+func (p *ParamTable) initInContainer() {
+	var err error
+	p.InContainer, err = metricsinfo.InContainer()
 	if err != nil {
 		panic(err)
 	}
-	id, err := strconv.Atoi(queryNodeID)
-	if err != nil {
-		panic(err)
-	}
-	p.QueryNodeID = UniqueID(id)
-}
-
-func (p *ParamTable) initQueryNodeNum() {
-	p.QueryNodeNum = len(p.QueryNodeIDList())
-}
-
-func (p *ParamTable) initQueryTimeTickChannelName() {
-	ch, err := p.Load("msgChannel.chanNamePrefix.queryTimeTick")
-	if err != nil {
-		log.Error(err.Error())
-	}
-	p.QueryTimeTickChannelName = ch
+	log.Debug("init InContainer", zap.Any("is query node running inside a container? :", p.InContainer))
 }
 
 // ---------------------------------------------------------- minio
@@ -199,40 +231,86 @@ func (p *ParamTable) initPulsarAddress() {
 	p.PulsarAddress = url
 }
 
+func (p *ParamTable) initRocksmqPath() {
+	path, err := p.Load("_RocksmqPath")
+	if err != nil {
+		panic(err)
+	}
+	p.RocksmqPath = path
+}
+
 // advanced params
 // stats
 func (p *ParamTable) initStatsPublishInterval() {
-	p.StatsPublishInterval = p.ParseInt("queryNode.stats.publishInterval")
+	p.StatsPublishInterval = p.ParseIntWithDefault("queryNode.stats.publishInterval", 1000)
 }
 
 // dataSync:
 func (p *ParamTable) initFlowGraphMaxQueueLength() {
-	p.FlowGraphMaxQueueLength = p.ParseInt32("queryNode.dataSync.flowGraph.maxQueueLength")
+	p.FlowGraphMaxQueueLength = p.ParseInt32WithDefault("queryNode.dataSync.flowGraph.maxQueueLength", 1024)
 }
 
 func (p *ParamTable) initFlowGraphMaxParallelism() {
-	p.FlowGraphMaxParallelism = p.ParseInt32("queryNode.dataSync.flowGraph.maxParallelism")
+	p.FlowGraphMaxParallelism = p.ParseInt32WithDefault("queryNode.dataSync.flowGraph.maxParallelism", 1024)
 }
 
 // msgStream
 func (p *ParamTable) initSearchReceiveBufSize() {
-	p.SearchReceiveBufSize = p.ParseInt64("queryNode.msgStream.search.recvBufSize")
+	p.SearchReceiveBufSize = p.ParseInt64WithDefault("queryNode.msgStream.search.recvBufSize", 512)
 }
 
 func (p *ParamTable) initSearchPulsarBufSize() {
-	p.SearchPulsarBufSize = p.ParseInt64("queryNode.msgStream.search.pulsarBufSize")
+	p.SearchPulsarBufSize = p.ParseInt64WithDefault("queryNode.msgStream.search.pulsarBufSize", 512)
 }
 
 func (p *ParamTable) initSearchResultReceiveBufSize() {
-	p.SearchResultReceiveBufSize = p.ParseInt64("queryNode.msgStream.searchResult.recvBufSize")
+	p.SearchResultReceiveBufSize = p.ParseInt64WithDefault("queryNode.msgStream.searchResult.recvBufSize", 64)
 }
 
-func (p *ParamTable) initEtcdAddress() {
-	EtcdAddress, err := p.Load("_EtcdAddress")
+// ------------------------  channel names
+func (p *ParamTable) initClusterMsgChannelPrefix() {
+	name, err := p.Load("msgChannel.chanNamePrefix.cluster")
 	if err != nil {
 		panic(err)
 	}
-	p.EtcdAddress = EtcdAddress
+	p.ClusterChannelPrefix = name
+}
+
+func (p *ParamTable) initQueryTimeTickChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.queryTimeTick")
+	if err != nil {
+		log.Warn(err.Error())
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.QueryTimeTickChannelName = strings.Join(s, "-")
+}
+
+func (p *ParamTable) initMsgChannelSubName() {
+	namePrefix, err := p.Load("msgChannel.subNamePrefix.queryNodeSubNamePrefix")
+	if err != nil {
+		log.Warn(err.Error())
+	}
+
+	s := []string{p.ClusterChannelPrefix, namePrefix, strconv.FormatInt(p.QueryNodeID, 10)}
+	p.MsgChannelSubName = strings.Join(s, "-")
+}
+
+func (p *ParamTable) initStatsChannelName() {
+	config, err := p.Load("msgChannel.chanNamePrefix.queryNodeStats")
+	if err != nil {
+		panic(err)
+	}
+	s := []string{p.ClusterChannelPrefix, config}
+	p.StatsChannelName = strings.Join(s, "-")
+}
+
+// ETCD configs
+func (p *ParamTable) initEtcdEndpoints() {
+	endpoints, err := p.Load("_EtcdEndpoints")
+	if err != nil {
+		panic(err)
+	}
+	p.EtcdEndpoints = strings.Split(endpoints, ",")
 }
 
 func (p *ParamTable) initMetaRootPath() {
@@ -251,70 +329,20 @@ func (p *ParamTable) initGracefulTime() {
 	p.GracefulTime = p.ParseInt64("queryNode.gracefulTime")
 }
 
-func (p *ParamTable) initMsgChannelSubName() {
-	// TODO: subName = namePrefix + "-" + queryNodeID, queryNodeID is assigned by master
-	name, err := p.Load("msgChannel.subNamePrefix.queryNodeSubNamePrefix")
-	if err != nil {
-		log.Error(err.Error())
-	}
-	queryNodeIDStr, err := p.Load("_QueryNodeID")
-	if err != nil {
-		panic(err)
-	}
-	p.MsgChannelSubName = name + "-" + queryNodeIDStr
+func (p *ParamTable) initSegcoreChunkRows() {
+	p.ChunkRows = p.ParseInt64WithDefault("queryNode.segcore.chunkRows", 32768)
 }
 
-func (p *ParamTable) initStatsChannelName() {
-	channels, err := p.Load("msgChannel.chanNamePrefix.queryNodeStats")
-	if err != nil {
-		panic(err)
-	}
-	p.StatsChannelName = channels
+func (p *ParamTable) initKnowhereSimdType() {
+	simdType := p.LoadWithDefault("knowhere.simdType", "auto")
+	p.SimdType = simdType
+	log.Debug("initialize the knowhere simd type", zap.String("simd_type", p.SimdType))
 }
 
-func (p *ParamTable) initSliceIndex() {
-	queryNodeID := p.QueryNodeID
-	queryNodeIDList := p.QueryNodeIDList()
-	for i := 0; i < len(queryNodeIDList); i++ {
-		if queryNodeID == queryNodeIDList[i] {
-			p.SliceIndex = i
-			return
-		}
-	}
-	p.SliceIndex = -1
+func (p *ParamTable) initRoleName() {
+	p.RoleName = "querynode"
 }
 
-func (p *ParamTable) initLogCfg() {
-	p.Log = log.Config{}
-	format, err := p.Load("log.format")
-	if err != nil {
-		panic(err)
-	}
-	p.Log.Format = format
-	level, err := p.Load("log.level")
-	if err != nil {
-		panic(err)
-	}
-	p.Log.Level = level
-	devStr, err := p.Load("log.dev")
-	if err != nil {
-		panic(err)
-	}
-	dev, err := strconv.ParseBool(devStr)
-	if err != nil {
-		panic(err)
-	}
-	p.Log.Development = dev
-	p.Log.File.MaxSize = p.ParseInt("log.file.maxSize")
-	p.Log.File.MaxBackups = p.ParseInt("log.file.maxBackups")
-	p.Log.File.MaxDays = p.ParseInt("log.file.maxAge")
-	rootPath, err := p.Load("log.file.rootPath")
-	if err != nil {
-		panic(err)
-	}
-	if len(rootPath) != 0 {
-		p.Log.File.Filename = path.Join(rootPath, fmt.Sprintf("querynode-%d.log", p.QueryNodeID))
-	} else {
-		p.Log.File.Filename = ""
-	}
+func (p *ParamTable) initSkipQueryChannelRecovery() {
+	p.skipQueryChannelRecovery = p.ParseBool("msgChannel.skipQueryChannelRecovery", false)
 }

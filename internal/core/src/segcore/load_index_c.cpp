@@ -9,11 +9,11 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
+#include "common/LoadInfo.h"
+#include "exceptions/EasyAssert.h"
 #include "index/knowhere/knowhere/common/BinarySet.h"
 #include "index/knowhere/knowhere/index/vector_index/VecIndexFactory.h"
 #include "segcore/load_index_c.h"
-#include "common/LoadInfo.h"
-#include "exceptions/EasyAssert.h"
 
 CStatus
 NewLoadIndexInfo(CLoadIndexInfo* c_load_index_info) {
@@ -84,7 +84,7 @@ AppendIndex(CLoadIndexInfo c_load_index_info, CBinarySet c_binary_set) {
         auto& index_params = load_index_info->index_params;
         bool find_index_type = index_params.count("index_type") > 0 ? true : false;
         bool find_index_mode = index_params.count("index_mode") > 0 ? true : false;
-        Assert(find_index_type == true);
+        AssertInfo(find_index_type == true, "Can't find index type in index_params");
         milvus::knowhere::IndexMode mode;
         if (find_index_mode) {
             mode = index_params["index_mode"] == "CPU" ? milvus::knowhere::IndexMode::MODE_CPU

@@ -12,36 +12,38 @@
 package rocksmq
 
 import (
-	"context"
 	"reflect"
+	"sync"
 
 	"github.com/milvus-io/milvus/internal/log"
 	server "github.com/milvus-io/milvus/internal/util/rocksmq/server/rocksmq"
+	"go.uber.org/zap"
 )
 
 type client struct {
 	server          RocksMQ
 	producerOptions []ProducerOptions
 	consumerOptions []ConsumerOptions
-	context         context.Context
-	cancel          context.CancelFunc
+	wg              *sync.WaitGroup
+	closeCh         chan struct{}
+	closeOnce       sync.Once
 }
 
 func newClient(options ClientOptions) (*client, error) {
 	if options.Server == nil {
-		return nil, newError(InvalidConfiguration, "Server is nil")
+		return nil, newError(InvalidConfiguration, "options.Server is nil")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	c := &client{
 		server:          options.Server,
 		producerOptions: []ProducerOptions{},
-		context:         ctx,
-		cancel:          cancel,
+		wg:              &sync.WaitGroup{},
+		closeCh:         make(chan struct{}),
 	}
 	return c, nil
 }
 
+// CreateProducer create a rocksmq producer
 func (c *client) CreateProducer(options ProducerOptions) (Producer, error) {
 	// Create a producer
 	producer, err := newProducer(c, options)
@@ -50,7 +52,7 @@ func (c *client) CreateProducer(options ProducerOptions) (Producer, error) {
 	}
 
 	if reflect.ValueOf(c.server).IsNil() {
-		return nil, newError(0, "rmq server is nil")
+		return nil, newError(0, "Rmq server is nil")
 	}
 	// Create a topic in rocksmq, ignore if topic exists
 	err = c.server.CreateTopic(options.Topic)
@@ -62,18 +64,24 @@ func (c *client) CreateProducer(options ProducerOptions) (Producer, error) {
 	return producer, nil
 }
 
+// Subscribe create a rocksmq consumer and start consume in a goroutine
 func (c *client) Subscribe(options ConsumerOptions) (Consumer, error) {
 	// Create a consumer
 	if reflect.ValueOf(c.server).IsNil() {
-		return nil, newError(0, "rmq server is nil")
+		return nil, newError(0, "Rmq server is nil")
 	}
 	if exist, con := c.server.ExistConsumerGroup(options.Topic, options.SubscriptionName); exist {
-		log.Debug("EXISTED")
-		consumer, err := newConsumer1(c, options, con.MsgMutex)
+		log.Debug("ConsumerGroup already existed", zap.Any("topic", options.Topic), zap.Any("SubscriptionName", options.SubscriptionName))
+		consumer, err := getExistedConsumer(c, options, con.MsgMutex)
 		if err != nil {
 			return nil, err
 		}
-		go consume(c.context, consumer)
+		if options.SubscriptionInitialPosition == SubscriptionPositionLatest {
+			err = c.server.SeekToLatest(options.Topic, options.SubscriptionName)
+			if err != nil {
+				return nil, err
+			}
+		}
 		return consumer, nil
 	}
 	consumer, err := newConsumer(c, options)
@@ -87,6 +95,12 @@ func (c *client) Subscribe(options ConsumerOptions) (Consumer, error) {
 		return nil, err
 	}
 
+	if options.SubscriptionInitialPosition == SubscriptionPositionLatest {
+		err = c.server.SeekToLatest(options.Topic, options.SubscriptionName)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Register self in rocksmq server
 	cons := &server.Consumer{
 		Topic:     consumer.topic,
@@ -97,56 +111,62 @@ func (c *client) Subscribe(options ConsumerOptions) (Consumer, error) {
 
 	// Take messages from RocksDB and put it into consumer.Chan(),
 	// trigger by consumer.MsgMutex which trigger by producer
-	go consume(c.context, consumer)
 	c.consumerOptions = append(c.consumerOptions, options)
 
 	return consumer, nil
 }
 
-func consume(ctx context.Context, consumer *consumer) {
+func (c *client) consume(consumer *consumer) {
+	defer c.wg.Done()
 	for {
 		select {
-		case <-ctx.Done():
-			log.Debug("client finished")
+		case <-c.closeCh:
 			return
 		case _, ok := <-consumer.MsgMutex():
 			if !ok {
 				// consumer MsgMutex closed, goroutine exit
-				log.Debug("consumer MsgMutex closed")
+				log.Debug("Consumer MsgMutex closed")
 				return
 			}
 
 			for {
-				msg, err := consumer.client.server.Consume(consumer.topic, consumer.consumerName, 1)
+				n := cap(consumer.messageCh) - len(consumer.messageCh)
+				if n < 100 { // batch min size
+					n = 100
+				}
+				msgs, err := consumer.client.server.Consume(consumer.topic, consumer.consumerName, n)
 				if err != nil {
 					log.Debug("Consumer's goroutine cannot consume from (" + consumer.topic +
 						"," + consumer.consumerName + "): " + err.Error())
 					break
 				}
 
-				if len(msg) != 1 {
-					//log.Debug("Consumer's goroutine cannot consume from (" + consumer.topic +
-					//	"," + consumer.consumerName + "): message len(" + strconv.Itoa(len(msg)) +
-					//	") is not 1")
+				// no more msgs
+				if len(msgs) == 0 {
 					break
 				}
-
-				consumer.messageCh <- ConsumerMessage{
-					MsgID:   msg[0].MsgID,
-					Payload: msg[0].Payload,
+				for _, msg := range msgs {
+					consumer.messageCh <- ConsumerMessage{
+						MsgID:   msg.MsgID,
+						Payload: msg.Payload,
+						Topic:   consumer.Topic(),
+					}
 				}
 			}
 		}
 	}
 }
 
+// Close close the channel to notify rocksmq to stop operation and close rocksmq server
 func (c *client) Close() {
-	// TODO: free resources
-	for _, opt := range c.consumerOptions {
-		log.Debug("Close" + opt.Topic + "+" + opt.SubscriptionName)
-		_ = c.server.DestroyConsumerGroup(opt.Topic, opt.SubscriptionName)
-		//TODO(yukun): Should topic be closed?
-		//_ = c.server.DestroyTopic(opt.Topic)
-	}
-	c.cancel()
+	// TODO(yukun): Should call server.close() here?
+	c.closeOnce.Do(func() {
+		close(c.closeCh)
+		c.wg.Wait()
+		if c.server != nil {
+			c.server.Close()
+		}
+		// Wait all consume goroutines exit
+		c.consumerOptions = nil
+	})
 }

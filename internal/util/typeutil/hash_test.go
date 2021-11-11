@@ -30,9 +30,14 @@ func TestHash32_Uint64(t *testing.T) {
 	var u uint64 = 0x12
 	h, err := Hash32Uint64(u)
 	assert.Nil(t, err)
-
 	t.Log(h)
 
+	h1, err := Hash32Int64(int64(u))
+	assert.Nil(t, err)
+	t.Log(h1)
+	assert.Equal(t, h, h1)
+
+	/* #nosec G103 */
 	b := make([]byte, unsafe.Sizeof(u))
 	b[0] = 0x12
 	h2, err := Hash32Bytes(b)
@@ -56,5 +61,4 @@ func TestHash32_String(t *testing.T) {
 	log.Println(h2)
 
 	assert.Equal(t, uint32(h), h2)
-
 }

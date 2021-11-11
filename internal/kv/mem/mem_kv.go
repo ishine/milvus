@@ -1,23 +1,31 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package memkv
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/google/btree"
 )
 
+// MemoryKV implements DataKV interface and relies on underling btree.BTree.
+// As its name implies, all data is stored in memory.
 type MemoryKV struct {
 	sync.RWMutex
 	tree *btree.BTree
@@ -38,14 +46,27 @@ func (s memoryKVItem) Less(than btree.Item) bool {
 	return s.key < than.(memoryKVItem).key
 }
 
+// Load loads an object with @key.
 func (kv *MemoryKV) Load(key string) (string, error) {
 	kv.RLock()
 	defer kv.RUnlock()
 	item := kv.tree.Get(memoryKVItem{key, ""})
+	// TODO，load unexisted key behavior is weird
 	if item == nil {
 		return "", nil
 	}
 	return item.(memoryKVItem).value, nil
+}
+
+func (kv *MemoryKV) LoadWithDefault(key, defaultValue string) string {
+	kv.RLock()
+	defer kv.RUnlock()
+	item := kv.tree.Get(memoryKVItem{key, ""})
+
+	if item == nil {
+		return defaultValue
+	}
+	return item.(memoryKVItem).value
 }
 
 func (kv *MemoryKV) LoadRange(key, endKey string, limit int) ([]string, []string, error) {
@@ -64,6 +85,7 @@ func (kv *MemoryKV) LoadRange(key, endKey string, limit int) ([]string, []string
 	return keys, values, nil
 }
 
+// Save object with @key to Minio. Object value is @value.
 func (kv *MemoryKV) Save(key, value string) error {
 	kv.Lock()
 	defer kv.Unlock()
@@ -71,6 +93,7 @@ func (kv *MemoryKV) Save(key, value string) error {
 	return nil
 }
 
+// Remove delete an object with @key.
 func (kv *MemoryKV) Remove(key string) error {
 	kv.Lock()
 	defer kv.Unlock()
@@ -79,6 +102,7 @@ func (kv *MemoryKV) Remove(key string) error {
 	return nil
 }
 
+// MultiLoad loads objects with multi @keys.
 func (kv *MemoryKV) MultiLoad(keys []string) ([]string, error) {
 	kv.RLock()
 	defer kv.RUnlock()
@@ -145,7 +169,26 @@ func (kv *MemoryKV) MultiRemoveWithPrefix(keys []string) error {
 	panic("not implement")
 }
 func (kv *MemoryKV) MultiSaveAndRemoveWithPrefix(saves map[string]string, removals []string) error {
-	panic("not implement")
+	kv.Lock()
+	defer kv.Unlock()
+
+	keys := make([]memoryKVItem, 0)
+	for _, key := range removals {
+		kv.tree.Ascend(func(i btree.Item) bool {
+			if strings.HasPrefix(i.(memoryKVItem).key, key) {
+				keys = append(keys, i.(memoryKVItem))
+			}
+			return true
+		})
+	}
+	for _, item := range keys {
+		kv.tree.Delete(item)
+	}
+
+	for key, value := range saves {
+		kv.tree.ReplaceOrInsert(memoryKVItem{key, value})
+	}
+	return nil
 }
 
 func (kv *MemoryKV) RemoveWithPrefix(key string) error {
@@ -164,4 +207,28 @@ func (kv *MemoryKV) RemoveWithPrefix(key string) error {
 		kv.tree.Delete(item)
 	}
 	return nil
+}
+
+// item already in memory, just slice the value.
+func (kv *MemoryKV) LoadPartial(key string, start, end int64) ([]byte, error) {
+	value, err := kv.Load(key)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case 0 <= start && start < end && end <= int64(len(value)):
+		return []byte(value[start:end]), nil
+	default:
+		return nil, fmt.Errorf("invalid range specified: start=%d end=%d",
+			start, end)
+	}
+}
+
+func (kv *MemoryKV) GetSize(key string) (int64, error) {
+	value, err := kv.Load(key)
+	if err != nil {
+		return 0, err
+	}
+
+	return int64(len(value)), nil
 }

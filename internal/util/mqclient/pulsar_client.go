@@ -13,8 +13,7 @@ package mqclient
 
 import (
 	"errors"
-	"reflect"
-	"unsafe"
+	"sync"
 
 	"github.com/apache/pulsar-client-go/pulsar"
 	"github.com/milvus-io/milvus/internal/log"
@@ -25,14 +24,22 @@ type pulsarClient struct {
 	client pulsar.Client
 }
 
-func NewPulsarClient(opts pulsar.ClientOptions) (*pulsarClient, error) {
-	c, err := pulsar.NewClient(opts)
-	if err != nil {
-		log.Error("Set pulsar client failed, error", zap.Error(err))
-		return nil, err
-	}
-	cli := &pulsarClient{client: c}
-	return cli, nil
+var sc *pulsarClient
+var once sync.Once
+
+// GetPulsarClientInstance creates a pulsarClient object
+// according to the parameter opts of type pulsar.ClientOptions
+func GetPulsarClientInstance(opts pulsar.ClientOptions) (*pulsarClient, error) {
+	once.Do(func() {
+		c, err := pulsar.NewClient(opts)
+		if err != nil {
+			log.Error("Failed to set pulsar client: ", zap.Error(err))
+			return
+		}
+		cli := &pulsarClient{client: c}
+		sc = cli
+	})
+	return sc, nil
 }
 
 func (pc *pulsarClient) CreateProducer(options ProducerOptions) (Producer, error) {
@@ -60,21 +67,12 @@ func (pc *pulsarClient) Subscribe(options ConsumerOptions) (Consumer, error) {
 	if err != nil {
 		return nil, err
 	}
-	msgChannel := make(chan ConsumerMessage, 1)
-	pConsumer := &pulsarConsumer{c: consumer, msgChannel: msgChannel}
 
-	go func() {
-		for { //nolint:gosimple
-			select {
-			case msg, ok := <-pConsumer.c.Chan():
-				if !ok {
-					close(msgChannel)
-					return
-				}
-				msgChannel <- &pulsarMessage{msg: msg}
-			}
-		}
-	}()
+	pConsumer := &PulsarConsumer{c: consumer, closeCh: make(chan struct{})}
+	// prevent seek to earliest patch applied when using latest position options
+	if options.SubscriptionInitialPosition == SubscriptionPositionLatest {
+		pConsumer.AtLatest = true
+	}
 
 	return pConsumer, nil
 }
@@ -102,11 +100,4 @@ func (pc *pulsarClient) BytesToMsgID(id []byte) (MessageID, error) {
 
 func (pc *pulsarClient) Close() {
 	pc.client.Close()
-
-	// This is a work around to avoid goroutinue leak of pulsar-client-go
-	// https://github.com/apache/pulsar-client-go/issues/493
-	// Very much unsafe, need to remove later
-	f := reflect.ValueOf(pc.client).Elem().FieldByName("cnxPool")
-	f = reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
-	f.MethodByName("Close").Call(nil)
 }

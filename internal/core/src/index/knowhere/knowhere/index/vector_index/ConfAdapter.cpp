@@ -96,7 +96,7 @@ MatchNlist(int64_t size, int64_t nlist) {
 
     if (nlist * MIN_POINTS_PER_CENTROID > size) {
         // nlist is too large, adjust to a proper value
-        nlist = std::max(1L, size / MIN_POINTS_PER_CENTROID);
+        nlist = std::max(static_cast<int64_t>(1), size / MIN_POINTS_PER_CENTROID);
         LOG_KNOWHERE_WARNING_ << "Row num " << size << " match nlist " << nlist;
     }
     return nlist;
@@ -311,7 +311,9 @@ RHNSWPQConfAdapter::CheckTrain(Config& oricfg, const IndexMode mode) {
 
     auto dimension = oricfg[knowhere::meta::DIM].get<int64_t>();
 
-    IVFPQConfAdapter::CheckCPUPQParams(dimension, oricfg[knowhere::IndexParams::PQM].get<int64_t>());
+    if (!IVFPQConfAdapter::CheckCPUPQParams(dimension, oricfg[knowhere::IndexParams::PQM].get<int64_t>())) {
+        return false;
+    }
 
     return ConfAdapter::CheckTrain(oricfg, mode);
 }

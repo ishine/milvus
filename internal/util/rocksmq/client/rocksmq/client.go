@@ -15,17 +15,23 @@ import (
 	server "github.com/milvus-io/milvus/internal/util/rocksmq/server/rocksmq"
 )
 
+// RocksMQ is the type server.RocksMQ
 type RocksMQ = server.RocksMQ
 
+// NewClient returns a rocksmq client
 func NewClient(options ClientOptions) (Client, error) {
-	options.Server = server.Rmq
+	if options.Server == nil {
+		options.Server = server.Rmq
+	}
 	return newClient(options)
 }
 
+// ClientOptions is the options of a client
 type ClientOptions struct {
 	Server RocksMQ
 }
 
+// Client is the interface rocksmq client
 type Client interface {
 	// Create a producer instance
 	CreateProducer(options ProducerOptions) (Producer, error)

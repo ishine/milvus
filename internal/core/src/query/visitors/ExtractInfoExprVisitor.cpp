@@ -29,12 +29,12 @@ class ExtractInfoExprVisitor : ExprVisitor {
 #endif
 
 void
-ExtractInfoExprVisitor::visit(BoolUnaryExpr& expr) {
+ExtractInfoExprVisitor::visit(LogicalUnaryExpr& expr) {
     expr.child_->accept(*this);
 }
 
 void
-ExtractInfoExprVisitor::visit(BoolBinaryExpr& expr) {
+ExtractInfoExprVisitor::visit(LogicalBinaryExpr& expr) {
     expr.left_->accept(*this);
     expr.right_->accept(*this);
 }
@@ -45,8 +45,19 @@ ExtractInfoExprVisitor::visit(TermExpr& expr) {
 }
 
 void
-ExtractInfoExprVisitor::visit(RangeExpr& expr) {
+ExtractInfoExprVisitor::visit(UnaryRangeExpr& expr) {
     plan_info_.add_involved_field(expr.field_offset_);
+}
+
+void
+ExtractInfoExprVisitor::visit(BinaryRangeExpr& expr) {
+    plan_info_.add_involved_field(expr.field_offset_);
+}
+
+void
+ExtractInfoExprVisitor::visit(CompareExpr& expr) {
+    plan_info_.add_involved_field(expr.left_field_offset_);
+    plan_info_.add_involved_field(expr.right_field_offset_);
 }
 
 }  // namespace milvus::query

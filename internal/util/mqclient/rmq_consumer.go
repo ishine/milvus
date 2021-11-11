@@ -12,29 +12,61 @@
 package mqclient
 
 import (
+	"sync"
+
 	"github.com/milvus-io/milvus/internal/util/rocksmq/client/rocksmq"
 )
 
-type rmqConsumer struct {
+// RmqConsumer is a client that used to consume messages from rocksmq
+type RmqConsumer struct {
 	c          rocksmq.Consumer
 	msgChannel chan ConsumerMessage
+	closeCh    chan struct{}
+	once       sync.Once
 }
 
-func (rc *rmqConsumer) Subscription() string {
+// Subscription returns the subscription name of this consumer
+func (rc *RmqConsumer) Subscription() string {
 	return rc.c.Subscription()
 }
 
-func (rc *rmqConsumer) Chan() <-chan ConsumerMessage {
+// Chan returns a channel to read messages from rocksmq
+func (rc *RmqConsumer) Chan() <-chan ConsumerMessage {
+	if rc.msgChannel == nil {
+		rc.once.Do(func() {
+			rc.msgChannel = make(chan ConsumerMessage, 256)
+			go func() {
+				for { //nolint:gosimple
+					select {
+					case msg, ok := <-rc.c.Chan():
+						if !ok {
+							close(rc.msgChannel)
+							return
+						}
+						rc.msgChannel <- &rmqMessage{msg: msg}
+					case <-rc.closeCh:
+						close(rc.msgChannel)
+						return
+					}
+				}
+			}()
+		})
+	}
 	return rc.msgChannel
 }
 
-func (rc *rmqConsumer) Seek(id MessageID) error {
+// Seek is used to seek the position in rocksmq topic
+func (rc *RmqConsumer) Seek(id MessageID) error {
 	msgID := id.(*rmqID).messageID
 	return rc.c.Seek(msgID)
 }
 
-func (rc *rmqConsumer) Ack(message ConsumerMessage) {
+// Ack is used to ask a rocksmq message
+func (rc *RmqConsumer) Ack(message ConsumerMessage) {
 }
 
-func (rc *rmqConsumer) Close() {
+// Close is used to free the resources of this consumer
+func (rc *RmqConsumer) Close() {
+	rc.c.Close()
+	close(rc.closeCh)
 }

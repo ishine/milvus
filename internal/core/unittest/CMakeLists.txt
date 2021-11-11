@@ -16,25 +16,25 @@ include_directories(${CMAKE_HOME_DIRECTORY}/src/thirdparty)
 add_definitions(-DMILVUS_TEST_SEGCORE_YAML_PATH="${CMAKE_SOURCE_DIR}/unittest/test_utils/test_segcore.yaml")
 
 set(MILVUS_TEST_FILES
-        test_naive.cpp
-        test_segcore.cpp
+        init_gtest.cpp
+        test_binary.cpp
+        test_bitmap.cpp
+        test_common.cpp
         test_concurrent_vector.cpp
         test_c_api.cpp
-        test_indexing.cpp
-        test_query.cpp
         test_expr.cpp
-        test_bitmap.cpp 
-        test_binary.cpp
+        test_get_entity_by_ids.cpp
+        test_indexing.cpp
         test_index_wrapper.cpp
-        test_common.cpp
-        test_sealed.cpp
-        test_reduce.cpp
-        test_interface.cpp
-        test_span.cpp
-        test_load.cpp
-        init_gtest.cpp
         test_init.cpp
         test_plan_proto.cpp
+        test_query.cpp
+        test_reduce.cpp
+        test_sealed.cpp
+        test_segcore.cpp
+        test_span.cpp
+        test_timestamp_index.cpp
+        test_reduce_c.cpp
         )
 
 add_executable(all_tests
@@ -49,6 +49,7 @@ set(INDEX_BUILDER_TEST_FILES
 add_executable(index_builder_test
         ${INDEX_BUILDER_TEST_FILES}
         )
+
 target_link_libraries(index_builder_test
         gtest
         gtest_main
@@ -66,5 +67,5 @@ target_link_libraries(all_tests
         pthread
         )
 
-install (TARGETS all_tests DESTINATION unittest)
-install (TARGETS index_builder_test DESTINATION unittest)
+install(TARGETS all_tests DESTINATION unittest)
+install(TARGETS index_builder_test DESTINATION unittest)

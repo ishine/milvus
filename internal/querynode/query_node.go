@@ -28,145 +28,200 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
+	"github.com/golang/protobuf/proto"
+	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.uber.org/zap"
 
+	"github.com/milvus-io/milvus/internal/kv"
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
-	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/internalpb"
-	queryPb "github.com/milvus-io/milvus/internal/proto/querypb"
+	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/types"
+	"github.com/milvus-io/milvus/internal/util/retry"
+	"github.com/milvus-io/milvus/internal/util/sessionutil"
+	"github.com/milvus-io/milvus/internal/util/typeutil"
 )
 
+const changeInfoMetaPrefix = "queryCoord-sealedSegmentChangeInfo"
+
+// make sure QueryNode implements types.QueryNode
+var _ types.QueryNode = (*QueryNode)(nil)
+
+// make sure QueryNode implements types.QueryNodeComponent
+var _ types.QueryNodeComponent = (*QueryNode)(nil)
+
+// QueryNode communicates with outside services and union all
+// services in querynode package.
+//
+// QueryNode implements `types.Component`, `types.QueryNode` interfaces.
+//  `rootCoord` is a grpc client of root coordinator.
+//  `indexCoord` is a grpc client of index coordinator.
+//  `stateCode` is current statement of this query node, indicating whether it's healthy.
 type QueryNode struct {
 	queryNodeLoopCtx    context.Context
 	queryNodeLoopCancel context.CancelFunc
 
-	QueryNodeID UniqueID
-	stateCode   atomic.Value
+	stateCode atomic.Value
 
-	replica ReplicaInterface
+	//call once
+	initOnce sync.Once
+
+	// internal components
+	historical *historical
+	streaming  *streaming
+
+	// tSafeReplica
+	tSafeReplica TSafeReplicaInterface
+
+	// dataSyncService
+	dataSyncService *dataSyncService
 
 	// internal services
-	metaService      *metaService
-	searchService    *searchService
-	loadService      *loadService
-	statsService     *statsService
-	dsServicesMu     sync.Mutex // guards dataSyncServices
-	dataSyncServices map[UniqueID]*dataSyncService
+	queryService *queryService
 
 	// clients
-	masterService types.MasterService
-	queryService  types.QueryService
-	indexService  types.IndexService
-	dataService   types.DataService
+	rootCoord  types.RootCoord
+	indexCoord types.IndexCoord
 
 	msFactory msgstream.Factory
 	scheduler *taskScheduler
+
+	session *sessionutil.Session
+
+	minioKV kv.BaseKV // minio minioKV
+	etcdKV  *etcdkv.EtcdKV
 }
 
-func NewQueryNode(ctx context.Context, queryNodeID UniqueID, factory msgstream.Factory) *QueryNode {
-	rand.Seed(time.Now().UnixNano())
+// NewQueryNode will return a QueryNode with abnormal state.
+func NewQueryNode(ctx context.Context, factory msgstream.Factory) *QueryNode {
 	ctx1, cancel := context.WithCancel(ctx)
 	node := &QueryNode{
 		queryNodeLoopCtx:    ctx1,
 		queryNodeLoopCancel: cancel,
-		QueryNodeID:         queryNodeID,
-
-		dataSyncServices: make(map[UniqueID]*dataSyncService),
-		metaService:      nil,
-		searchService:    nil,
-		statsService:     nil,
-
-		msFactory: factory,
+		queryService:        nil,
+		msFactory:           factory,
 	}
 
 	node.scheduler = newTaskScheduler(ctx1)
-	node.replica = newCollectionReplica()
-	node.UpdateStateCode(internalpb.StateCode_Abnormal)
-	return node
-}
-
-func NewQueryNodeWithoutID(ctx context.Context, factory msgstream.Factory) *QueryNode {
-	ctx1, cancel := context.WithCancel(ctx)
-	node := &QueryNode{
-		queryNodeLoopCtx:    ctx1,
-		queryNodeLoopCancel: cancel,
-
-		dataSyncServices: make(map[UniqueID]*dataSyncService),
-		metaService:      nil,
-		searchService:    nil,
-		statsService:     nil,
-
-		msFactory: factory,
-	}
-
-	node.scheduler = newTaskScheduler(ctx1)
-	node.replica = newCollectionReplica()
 	node.UpdateStateCode(internalpb.StateCode_Abnormal)
 
 	return node
 }
 
-func (node *QueryNode) Init() error {
-	ctx := context.Background()
-
-	C.SegcoreInit()
-	registerReq := &queryPb.RegisterNodeRequest{
-		Base: &commonpb.MsgBase{
-			SourceID: Params.QueryNodeID,
-		},
-		Address: &commonpb.Address{
-			Ip:   Params.QueryNodeIP,
-			Port: Params.QueryNodePort,
-		},
-	}
-
-	resp, err := node.queryService.RegisterNode(ctx, registerReq)
-	if err != nil {
-		panic(err)
-	}
-	if resp.Status.ErrorCode != commonpb.ErrorCode_Success {
-		panic(resp.Status.Reason)
-	}
-
-	for _, kv := range resp.InitParams.StartParams {
-		switch kv.Key {
-		case "StatsChannelName":
-			Params.StatsChannelName = kv.Value
-		case "TimeTickChannelName":
-			Params.QueryTimeTickChannelName = kv.Value
-		case "SearchChannelName":
-			Params.SearchChannelNames = append(Params.SearchChannelNames, kv.Value)
-		case "SearchResultChannelName":
-			Params.SearchResultChannelNames = append(Params.SearchResultChannelNames, kv.Value)
-		default:
-			return fmt.Errorf("Invalid key: %v", kv.Key)
+// Register register query node at etcd
+func (node *QueryNode) Register() error {
+	log.Debug("query node session info", zap.String("metaPath", Params.MetaRootPath), zap.Strings("etcdEndPoints", Params.EtcdEndpoints))
+	node.session = sessionutil.NewSession(node.queryNodeLoopCtx, Params.MetaRootPath, Params.EtcdEndpoints)
+	node.session.Init(typeutil.QueryNodeRole, Params.QueryNodeIP+":"+strconv.FormatInt(Params.QueryNodePort, 10), false)
+	// start liveness check
+	go node.session.LivenessCheck(node.queryNodeLoopCtx, func() {
+		log.Error("Query Node disconnected from etcd, process will exit", zap.Int64("Server Id", node.session.ServerID))
+		if err := node.Stop(); err != nil {
+			log.Fatal("failed to stop server", zap.Error(err))
 		}
-	}
+	})
 
-	log.Debug("", zap.Int64("QueryNodeID", Params.QueryNodeID))
+	Params.QueryNodeID = node.session.ServerID
+	Params.SetLogger(Params.QueryNodeID)
+	log.Debug("query nodeID", zap.Int64("nodeID", Params.QueryNodeID))
+	log.Debug("query node address", zap.String("address", node.session.Address))
 
-	if node.masterService == nil {
-		log.Error("null master service detected")
-	}
-
-	if node.indexService == nil {
-		log.Error("null index service detected")
-	}
-
-	if node.dataService == nil {
-		log.Error("null data service detected")
-	}
-
+	// This param needs valid QueryNodeID
+	Params.initMsgChannelSubName()
+	//TODO Reset the logger
+	//Params.initLogCfg()
 	return nil
 }
 
+// InitSegcore set init params of segCore, such as chunckRows, SIMD type...
+func (node *QueryNode) InitSegcore() {
+	C.SegcoreInit()
+
+	// override segcore chunk size
+	cChunkRows := C.int64_t(Params.ChunkRows)
+	C.SegcoreSetChunkRows(cChunkRows)
+
+	// override segcore SIMD type
+	cSimdType := C.CString(Params.SimdType)
+	cRealSimdType := C.SegcoreSetSimdType(cSimdType)
+	Params.SimdType = C.GoString(cRealSimdType)
+	C.free(unsafe.Pointer(cRealSimdType))
+	C.free(unsafe.Pointer(cSimdType))
+}
+
+// Init function init historical and streaming module to manage segments
+func (node *QueryNode) Init() error {
+	var initError error = nil
+	node.initOnce.Do(func() {
+		//ctx := context.Background()
+		connectEtcdFn := func() error {
+			etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
+			if err != nil {
+				return err
+			}
+			node.etcdKV = etcdKV
+			return err
+		}
+		log.Debug("queryNode try to connect etcd",
+			zap.Any("EtcdEndpoints", Params.EtcdEndpoints),
+			zap.Any("MetaRootPath", Params.MetaRootPath),
+		)
+		err := retry.Do(node.queryNodeLoopCtx, connectEtcdFn, retry.Attempts(300))
+		if err != nil {
+			log.Debug("queryNode try to connect etcd failed", zap.Error(err))
+			initError = err
+			return
+		}
+		log.Debug("queryNode try to connect etcd success",
+			zap.Any("EtcdEndpoints", Params.EtcdEndpoints),
+			zap.Any("MetaRootPath", Params.MetaRootPath),
+		)
+		node.tSafeReplica = newTSafeReplica()
+
+		streamingReplica := newCollectionReplica(node.etcdKV)
+		historicalReplica := newCollectionReplica(node.etcdKV)
+
+		node.historical = newHistorical(node.queryNodeLoopCtx,
+			historicalReplica,
+			node.rootCoord,
+			node.indexCoord,
+			node.msFactory,
+			node.etcdKV,
+			node.tSafeReplica,
+		)
+		node.streaming = newStreaming(node.queryNodeLoopCtx,
+			streamingReplica,
+			node.msFactory,
+			node.etcdKV,
+			node.tSafeReplica,
+		)
+
+		node.dataSyncService = newDataSyncService(node.queryNodeLoopCtx, streamingReplica, historicalReplica, node.tSafeReplica, node.msFactory)
+
+		node.InitSegcore()
+
+		if node.rootCoord == nil {
+			log.Error("null root coordinator detected")
+		}
+
+		if node.indexCoord == nil {
+			log.Error("null index coordinator detected")
+		}
+	})
+
+	return initError
+}
+
+// Start mainly start QueryNode's query service.
 func (node *QueryNode) Start() error {
 	var err error
 	m := map[string]interface{}{
@@ -179,104 +234,195 @@ func (node *QueryNode) Start() error {
 	}
 
 	// init services and manager
-	node.searchService = newSearchService(node.queryNodeLoopCtx, node.replica, node.msFactory)
-	node.loadService = newLoadService(node.queryNodeLoopCtx, node.masterService, node.dataService, node.indexService, node.replica)
-	node.statsService = newStatsService(node.queryNodeLoopCtx, node.replica, node.loadService.segLoader.indexLoader.fieldStatsChan, node.msFactory)
+	// TODO: pass node.streaming.replica to search service
+	node.queryService = newQueryService(node.queryNodeLoopCtx,
+		node.historical,
+		node.streaming,
+		node.msFactory)
 
 	// start task scheduler
 	go node.scheduler.Start()
 
 	// start services
-	go node.searchService.start()
-	go node.loadService.start()
-	go node.statsService.start()
+	go node.historical.start()
+	go node.watchChangeInfo()
+
+	Params.CreatedTime = time.Now()
+	Params.UpdatedTime = time.Now()
+
 	node.UpdateStateCode(internalpb.StateCode_Healthy)
 	return nil
 }
 
+// Stop mainly stop QueryNode's query service, historical loop and streaming loop.
 func (node *QueryNode) Stop() error {
 	node.UpdateStateCode(internalpb.StateCode_Abnormal)
 	node.queryNodeLoopCancel()
 
-	// free collectionReplica
-	node.replica.freeAll()
-
 	// close services
-	for _, dsService := range node.dataSyncServices {
-		if dsService != nil {
-			dsService.close()
-		}
+	if node.dataSyncService != nil {
+		node.dataSyncService.close()
 	}
-	if node.searchService != nil {
-		node.searchService.close()
+	if node.historical != nil {
+		node.historical.close()
 	}
-	if node.loadService != nil {
-		node.loadService.close()
+	if node.streaming != nil {
+		node.streaming.close()
 	}
-	if node.statsService != nil {
-		node.statsService.close()
+	if node.queryService != nil {
+		node.queryService.close()
 	}
 	return nil
 }
 
+// UpdateStateCode updata the state of query node, which can be initializing, healthy, and abnormal
 func (node *QueryNode) UpdateStateCode(code internalpb.StateCode) {
 	node.stateCode.Store(code)
 }
 
-func (node *QueryNode) SetMasterService(master types.MasterService) error {
-	if master == nil {
-		return errors.New("null master service interface")
+// SetRootCoord assigns parameter rc to its member rootCoord.
+func (node *QueryNode) SetRootCoord(rc types.RootCoord) error {
+	if rc == nil {
+		return errors.New("null root coordinator interface")
 	}
-	node.masterService = master
+	node.rootCoord = rc
 	return nil
 }
 
-func (node *QueryNode) SetQueryService(query types.QueryService) error {
-	if query == nil {
-		return errors.New("null query service interface")
-	}
-	node.queryService = query
-	return nil
-}
-
-func (node *QueryNode) SetIndexService(index types.IndexService) error {
+// SetIndexCoord assigns parameter index to its member indexCoord.
+func (node *QueryNode) SetIndexCoord(index types.IndexCoord) error {
 	if index == nil {
-		return errors.New("null index service interface")
+		return errors.New("null index coordinator interface")
 	}
-	node.indexService = index
+	node.indexCoord = index
 	return nil
 }
 
-func (node *QueryNode) SetDataService(data types.DataService) error {
-	if data == nil {
-		return errors.New("null data service interface")
+func (node *QueryNode) watchChangeInfo() {
+	log.Debug("query node watchChangeInfo start")
+	watchChan := node.etcdKV.WatchWithPrefix(changeInfoMetaPrefix)
+
+	for {
+		select {
+		case <-node.queryNodeLoopCtx.Done():
+			log.Debug("query node watchChangeInfo close")
+			return
+		case resp := <-watchChan:
+			for _, event := range resp.Events {
+				switch event.Type {
+				case mvccpb.PUT:
+					infoID, err := strconv.ParseInt(filepath.Base(string(event.Kv.Key)), 10, 64)
+					if err != nil {
+						log.Warn("Parse SealedSegmentsChangeInfo id failed", zap.Any("error", err.Error()))
+						continue
+					}
+					log.Debug("get SealedSegmentsChangeInfo from etcd",
+						zap.Any("infoID", infoID),
+					)
+					info := &querypb.SealedSegmentsChangeInfo{}
+					err = proto.Unmarshal(event.Kv.Value, info)
+					if err != nil {
+						log.Warn("Unmarshal SealedSegmentsChangeInfo failed", zap.Any("error", err.Error()))
+						continue
+					}
+					go func() {
+						err = node.adjustByChangeInfo(info)
+						if err != nil {
+							log.Warn("adjustByChangeInfo failed", zap.Any("error", err.Error()))
+						}
+					}()
+				default:
+					// do nothing
+				}
+			}
+		}
 	}
-	node.dataService = data
+}
+
+func (node *QueryNode) waitChangeInfo(segmentChangeInfos *querypb.SealedSegmentsChangeInfo) error {
+	fn := func() error {
+		for _, info := range segmentChangeInfos.Infos {
+			canDoLoadBalance := true
+			// Check online segments:
+			for _, segmentInfo := range info.OnlineSegments {
+				if node.queryService.hasQueryCollection(segmentInfo.CollectionID) {
+					qc, err := node.queryService.getQueryCollection(segmentInfo.CollectionID)
+					if err != nil {
+						canDoLoadBalance = false
+						break
+					}
+					if info.OnlineNodeID == Params.QueryNodeID && !qc.globalSegmentManager.hasGlobalSegment(segmentInfo.SegmentID) {
+						canDoLoadBalance = false
+						break
+					}
+				}
+			}
+			// Check offline segments:
+			for _, segmentInfo := range info.OfflineSegments {
+				if node.queryService.hasQueryCollection(segmentInfo.CollectionID) {
+					qc, err := node.queryService.getQueryCollection(segmentInfo.CollectionID)
+					if err != nil {
+						canDoLoadBalance = false
+						break
+					}
+					if info.OfflineNodeID == Params.QueryNodeID && qc.globalSegmentManager.hasGlobalSegment(segmentInfo.SegmentID) {
+						canDoLoadBalance = false
+						break
+					}
+				}
+			}
+			if canDoLoadBalance {
+				return nil
+			}
+			return errors.New(fmt.Sprintln("waitChangeInfo failed, infoID = ", segmentChangeInfos.Base.GetMsgID()))
+		}
+
+		return nil
+	}
+
+	return retry.Do(context.TODO(), fn, retry.Attempts(10))
+}
+
+func (node *QueryNode) adjustByChangeInfo(segmentChangeInfos *querypb.SealedSegmentsChangeInfo) error {
+	err := node.waitChangeInfo(segmentChangeInfos)
+	if err != nil {
+		log.Error("waitChangeInfo failed", zap.Any("error", err.Error()))
+		return err
+	}
+
+	node.streaming.replica.queryLock()
+	node.historical.replica.queryLock()
+	defer node.streaming.replica.queryUnlock()
+	defer node.historical.replica.queryUnlock()
+	for _, info := range segmentChangeInfos.Infos {
+		// For online segments:
+		for _, segmentInfo := range info.OnlineSegments {
+			// delete growing segment because these segments are loaded in historical.
+			hasGrowingSegment := node.streaming.replica.hasSegment(segmentInfo.SegmentID)
+			if hasGrowingSegment {
+				err := node.streaming.replica.removeSegment(segmentInfo.SegmentID)
+				if err != nil {
+
+					return err
+				}
+				log.Debug("remove growing segment in adjustByChangeInfo",
+					zap.Any("collectionID", segmentInfo.CollectionID),
+					zap.Any("segmentID", segmentInfo.SegmentID),
+					zap.Any("infoID", segmentChangeInfos.Base.GetMsgID()),
+				)
+			}
+		}
+
+		// For offline segments:
+		for _, segment := range info.OfflineSegments {
+			// load balance or compaction, remove old sealed segments.
+			if info.OfflineNodeID == Params.QueryNodeID {
+				err := node.historical.replica.removeSegment(segment.SegmentID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
-}
-
-func (node *QueryNode) getDataSyncService(collectionID UniqueID) (*dataSyncService, error) {
-	node.dsServicesMu.Lock()
-	defer node.dsServicesMu.Unlock()
-	ds, ok := node.dataSyncServices[collectionID]
-	if !ok {
-		return nil, errors.New("cannot found dataSyncService, collectionID =" + fmt.Sprintln(collectionID))
-	}
-	return ds, nil
-}
-
-func (node *QueryNode) addDataSyncService(collectionID UniqueID, ds *dataSyncService) error {
-	node.dsServicesMu.Lock()
-	defer node.dsServicesMu.Unlock()
-	if _, ok := node.dataSyncServices[collectionID]; ok {
-		return errors.New("dataSyncService has been existed, collectionID =" + fmt.Sprintln(collectionID))
-	}
-	node.dataSyncServices[collectionID] = ds
-	return nil
-}
-
-func (node *QueryNode) removeDataSyncService(collectionID UniqueID) {
-	node.dsServicesMu.Lock()
-	defer node.dsServicesMu.Unlock()
-	delete(node.dataSyncServices, collectionID)
 }

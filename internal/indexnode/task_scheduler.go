@@ -1,13 +1,18 @@
-// Copyright (C) 2019-2020 Zilliz. All rights reserved.
-//
-// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance
+// Licensed to the LF AI & Data foundation under one
+// or more contributor license agreements. See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership. The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
 // with the License. You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// Unless required by applicable law or agreed to in writing, software distributed under the License
-// is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
-// or implied. See the License for the specific language governing permissions and limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package indexnode
 
@@ -26,19 +31,21 @@ import (
 	oplog "github.com/opentracing/opentracing-go/log"
 )
 
+// TaskQueue is a queue used to store tasks.
 type TaskQueue interface {
 	utChan() <-chan int
 	utEmpty() bool
 	utFull() bool
 	addUnissuedTask(t task) error
-	FrontUnissuedTask() task
+	//FrontUnissuedTask() task
 	PopUnissuedTask() task
 	AddActiveTask(t task)
 	PopActiveTask(tID UniqueID) task
 	Enqueue(t task) error
-	tryToRemoveUselessIndexBuildTask(indexID UniqueID) []UniqueID
+	//tryToRemoveUselessIndexBuildTask(indexID UniqueID) []UniqueID
 }
 
+// BaseTaskQueue is a basic instance of TaskQueue.
 type BaseTaskQueue struct {
 	unissuedTasks *list.List
 	activeTasks   map[UniqueID]task
@@ -70,31 +77,31 @@ func (queue *BaseTaskQueue) addUnissuedTask(t task) error {
 	defer queue.utLock.Unlock()
 
 	if queue.utFull() {
-		return errors.New("task queue is full")
+		return errors.New("IndexNode task queue is full")
 	}
 	queue.unissuedTasks.PushBack(t)
 	queue.utBufChan <- 1
 	return nil
 }
 
-func (queue *BaseTaskQueue) FrontUnissuedTask() task {
-	queue.utLock.Lock()
-	defer queue.utLock.Unlock()
+//func (queue *BaseTaskQueue) FrontUnissuedTask() task {
+//	queue.utLock.Lock()
+//	defer queue.utLock.Unlock()
+//
+//	if queue.unissuedTasks.Len() <= 0 {
+//		log.Debug("IndexNode FrontUnissuedTask sorry, but the unissued task list is empty!")
+//		return nil
+//	}
+//
+//	return queue.unissuedTasks.Front().Value.(task)
+//}
 
-	if queue.unissuedTasks.Len() <= 0 {
-		log.Debug("FrontUnissuedTask sorry, but the unissued task list is empty!")
-		return nil
-	}
-
-	return queue.unissuedTasks.Front().Value.(task)
-}
-
+// PopUnissuedTask pops a task from tasks queue.
 func (queue *BaseTaskQueue) PopUnissuedTask() task {
 	queue.utLock.Lock()
 	defer queue.utLock.Unlock()
 
 	if queue.unissuedTasks.Len() <= 0 {
-		log.Debug("PopUnissued task sorry, but the unissued task list is empty!")
 		return nil
 	}
 
@@ -104,6 +111,7 @@ func (queue *BaseTaskQueue) PopUnissuedTask() task {
 	return ft.Value.(task)
 }
 
+// AddActiveTask adds a task to activeTasks.
 func (queue *BaseTaskQueue) AddActiveTask(t task) {
 	queue.atLock.Lock()
 	defer queue.atLock.Unlock()
@@ -111,12 +119,13 @@ func (queue *BaseTaskQueue) AddActiveTask(t task) {
 	tID := t.ID()
 	_, ok := queue.activeTasks[tID]
 	if ok {
-		log.Debug("indexnode", zap.Int64("task with ID %v already in active task list!", tID))
+		log.Debug("IndexNode task already in active task list", zap.Any("TaskID", tID))
 	}
 
 	queue.activeTasks[tID] = t
 }
 
+// PopActiveTask tasks out a task from activateTask and the task will be executed.
 func (queue *BaseTaskQueue) PopActiveTask(tID UniqueID) task {
 	queue.atLock.Lock()
 	defer queue.atLock.Unlock()
@@ -126,31 +135,32 @@ func (queue *BaseTaskQueue) PopActiveTask(tID UniqueID) task {
 		delete(queue.activeTasks, tID)
 		return t
 	}
-	log.Debug("indexnode", zap.Int64("sorry, but the ID was not found in the active task list!", tID))
+	log.Debug("IndexNode task was not found in the active task list", zap.Any("TaskID", tID))
 	return nil
 }
 
-func (queue *BaseTaskQueue) tryToRemoveUselessIndexBuildTask(indexID UniqueID) []UniqueID {
-	queue.utLock.Lock()
-	defer queue.utLock.Unlock()
+//func (queue *BaseTaskQueue) tryToRemoveUselessIndexBuildTask(indexID UniqueID) []UniqueID {
+//	queue.utLock.Lock()
+//	defer queue.utLock.Unlock()
+//
+//	var next *list.Element
+//	var indexBuildIDs []UniqueID
+//	for e := queue.unissuedTasks.Front(); e != nil; e = next {
+//		next = e.Next()
+//		indexBuildTask, ok := e.Value.(*IndexBuildTask)
+//		if !ok {
+//			continue
+//		}
+//		if indexBuildTask.req.IndexID == indexID {
+//			indexBuildIDs = append(indexBuildIDs, indexBuildTask.req.IndexBuildID)
+//			queue.unissuedTasks.Remove(e)
+//			indexBuildTask.Notify(nil)
+//		}
+//	}
+//	return indexBuildIDs
+//}
 
-	var next *list.Element
-	var indexBuildIDs []UniqueID
-	for e := queue.unissuedTasks.Front(); e != nil; e = next {
-		next = e.Next()
-		indexBuildTask, ok := e.Value.(*IndexBuildTask)
-		if !ok {
-			continue
-		}
-		if indexBuildTask.req.IndexID == indexID {
-			indexBuildIDs = append(indexBuildIDs, indexBuildTask.req.IndexBuildID)
-			queue.unissuedTasks.Remove(e)
-			indexBuildTask.Notify(nil)
-		}
-	}
-	return indexBuildIDs
-}
-
+// Enqueue adds a task to TaskQueue.
 func (queue *BaseTaskQueue) Enqueue(t task) error {
 	err := t.OnEnqueue()
 	if err != nil {
@@ -159,10 +169,12 @@ func (queue *BaseTaskQueue) Enqueue(t task) error {
 	return queue.addUnissuedTask(t)
 }
 
+// IndexBuildTaskQueue is a task queue used to store building index tasks.
 type IndexBuildTaskQueue struct {
 	BaseTaskQueue
 }
 
+// NewIndexBuildTaskQueue creates a new IndexBuildTaskQueue.
 func NewIndexBuildTaskQueue(sched *TaskScheduler) *IndexBuildTaskQueue {
 	return &IndexBuildTaskQueue{
 		BaseTaskQueue: BaseTaskQueue{
@@ -175,6 +187,7 @@ func NewIndexBuildTaskQueue(sched *TaskScheduler) *IndexBuildTaskQueue {
 	}
 }
 
+// TaskScheduler is a scheduler of indexing tasks.
 type TaskScheduler struct {
 	IndexBuildQueue TaskQueue
 
@@ -185,6 +198,7 @@ type TaskScheduler struct {
 	cancel        context.CancelFunc
 }
 
+// NewTaskScheduler creates a new task scheduler of indexing tasks.
 func NewTaskScheduler(ctx context.Context,
 	kv kv.BaseKV) (*TaskScheduler, error) {
 	ctx1, cancel := context.WithCancel(ctx)
@@ -199,13 +213,13 @@ func NewTaskScheduler(ctx context.Context,
 	return s, nil
 }
 
-func (sched *TaskScheduler) setParallelism(parallel int) {
-	if parallel <= 0 {
-		log.Debug("can not set parallelism to less than zero!")
-		return
-	}
-	sched.buildParallel = parallel
-}
+//func (sched *TaskScheduler) setParallelism(parallel int) {
+//	if parallel <= 0 {
+//		log.Debug("IndexNode can not set parallelism to less than zero!")
+//		return
+//	}
+//	sched.buildParallel = parallel
+//}
 
 func (sched *TaskScheduler) scheduleIndexBuildTask() []task {
 	ret := make([]task, 0)
@@ -258,7 +272,7 @@ func (sched *TaskScheduler) processTask(t task, q TaskQueue) {
 }
 
 func (sched *TaskScheduler) indexBuildLoop() {
-	log.Debug("index build loop ...")
+	log.Debug("IndexNode TaskScheduler start build loop ...")
 	defer sched.wg.Done()
 	for {
 		select {
@@ -281,6 +295,7 @@ func (sched *TaskScheduler) indexBuildLoop() {
 	}
 }
 
+// Start stats the task scheduler of indexing tasks.
 func (sched *TaskScheduler) Start() error {
 
 	sched.wg.Add(1)
@@ -288,6 +303,7 @@ func (sched *TaskScheduler) Start() error {
 	return nil
 }
 
+// Close closes the task scheduler of indexing tasks.
 func (sched *TaskScheduler) Close() {
 	sched.cancel()
 	sched.wg.Wait()

@@ -28,13 +28,14 @@ import (
 	"github.com/milvus-io/milvus/internal/log"
 )
 
+// Partition is a logical division of Collection and can be considered as an attribute of Segment.
 type Partition struct {
 	collectionID UniqueID
 	partitionID  UniqueID
 	segmentIDs   []UniqueID
-	enable       bool
 }
 
+// ID returns the identity of the partition.
 func (p *Partition) ID() UniqueID {
 	return p.partitionID
 }
@@ -57,7 +58,6 @@ func newPartition(collectionID UniqueID, partitionID UniqueID) *Partition {
 	var newPartition = &Partition{
 		collectionID: collectionID,
 		partitionID:  partitionID,
-		enable:       false,
 	}
 
 	log.Debug("create partition", zap.Int64("partitionID", partitionID))

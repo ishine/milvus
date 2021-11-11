@@ -10,15 +10,18 @@
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
 #include <gtest/gtest.h>
-#include "utils/tools.h"
-#include "test_utils/DataGen.h"
+
 #include "segcore/SegmentGrowing.h"
+#include "test_utils/DataGen.h"
+#include "utils/Utils.h"
+
+const int64_t ROW_COUNT = 100 * 1000;
 
 TEST(Span, Naive) {
     using namespace milvus;
     using namespace milvus::query;
     using namespace milvus::segcore;
-    int64_t N = 1000 * 1000;
+    int64_t N = ROW_COUNT;
     constexpr int64_t size_per_chunk = 32 * 1024;
     auto schema = std::make_shared<Schema>();
     schema->AddDebugField("binaryvec", DataType::VECTOR_BINARY, 512, MetricType::METRIC_Jaccard);
@@ -44,14 +47,14 @@ TEST(Span, Naive) {
         auto float_span = interface.chunk_data<FloatVector>(FieldOffset(2), chunk_id);
         auto begin = chunk_id * size_per_chunk;
         auto end = std::min((chunk_id + 1) * size_per_chunk, N);
-        auto size_per_chunk = end - begin;
-        for (int i = 0; i < size_per_chunk * 512 / 8; ++i) {
+        auto size_of_chunk = end - begin;
+        for (int i = 0; i < size_of_chunk * 512 / 8; ++i) {
             ASSERT_EQ(vec_span.data()[i], vec_ptr[i + begin * 512 / 8]);
         }
-        for (int i = 0; i < size_per_chunk; ++i) {
+        for (int i = 0; i < size_of_chunk; ++i) {
             ASSERT_EQ(age_span.data()[i], age_ptr[i + begin]);
         }
-        for (int i = 0; i < size_per_chunk; ++i) {
+        for (int i = 0; i < size_of_chunk; ++i) {
             ASSERT_EQ(float_span.data()[i], float_ptr[i + begin * 32]);
         }
     }

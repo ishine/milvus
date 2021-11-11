@@ -14,15 +14,18 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 	"time"
 	"unsafe"
 
+	"github.com/milvus-io/milvus/internal/common"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/util/tsoutil"
 	"github.com/stretchr/testify/assert"
 )
 
+/* #nosec G103 */
 func checkEventHeader(
 	t *testing.T,
 	buf []byte,
@@ -44,12 +47,30 @@ func checkEventHeader(
 	assert.Equal(t, nPos, length)
 }
 
+/* #nosec G103 */
 func TestDescriptorEvent(t *testing.T) {
 	desc := newDescriptorEvent()
 
 	var buf bytes.Buffer
 
 	err := desc.Write(&buf)
+	assert.NotNil(t, err)
+
+	sizeTotal := 20 // not important
+	desc.AddExtra(originalSizeKey, sizeTotal)
+
+	// original size not in string format
+	err = desc.Write(&buf)
+	assert.NotNil(t, err)
+
+	desc.AddExtra(originalSizeKey, "not in int format")
+
+	err = desc.Write(&buf)
+	assert.NotNil(t, err)
+
+	desc.AddExtra(originalSizeKey, fmt.Sprintf("%v", sizeTotal))
+
+	err = desc.Write(&buf)
 	assert.Nil(t, err)
 
 	buffer := buf.Bytes()
@@ -62,71 +83,33 @@ func TestDescriptorEvent(t *testing.T) {
 
 	utc := UnsafeReadInt8(buffer, int(unsafe.Sizeof(ts)))
 	assert.Equal(t, EventTypeCode(utc), DescriptorEventType)
-	usID := UnsafeReadInt32(buffer, int(unsafe.Sizeof(ts)+unsafe.Sizeof(utc)))
-	assert.Equal(t, usID, int32(ServerID))
-	elen := UnsafeReadInt32(buffer, int(unsafe.Sizeof(ts)+unsafe.Sizeof(utc)+unsafe.Sizeof(usID)))
+	elen := UnsafeReadInt32(buffer, int(unsafe.Sizeof(ts)+unsafe.Sizeof(utc)))
 	assert.Equal(t, elen, int32(len(buffer)))
-	nPos := UnsafeReadInt32(buffer, int(unsafe.Sizeof(ts)+unsafe.Sizeof(utc)+unsafe.Sizeof(usID)+unsafe.Sizeof(elen)))
+	nPos := UnsafeReadInt32(buffer, int(unsafe.Sizeof(ts)+unsafe.Sizeof(utc)+unsafe.Sizeof(elen)))
 	assert.GreaterOrEqual(t, nPos, int32(binary.Size(MagicNumber)+len(buffer)))
 	t.Logf("next position = %d", nPos)
 
-	binVersion := UnsafeReadInt16(buffer, binary.Size(eventHeader{}))
-	assert.Equal(t, binVersion, int16(BinlogVersion))
-	svrVersion := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+int(unsafe.Sizeof(binVersion)))
-	assert.Equal(t, svrVersion, int64(ServerVersion))
-	commitID := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+int(unsafe.Sizeof(binVersion))+int(unsafe.Sizeof(svrVersion)))
-	assert.Equal(t, commitID, int64(CommitID))
-	headLen := UnsafeReadInt8(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID)))
-	assert.Equal(t, headLen, int8(binary.Size(eventHeader{})))
-	t.Logf("head len = %d", headLen)
-	collID := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen)))
+	collID := UnsafeReadInt64(buffer, binary.Size(eventHeader{}))
 	assert.Equal(t, collID, int64(-1))
 	partID := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen))+
 		int(unsafe.Sizeof(collID)))
 	assert.Equal(t, partID, int64(-1))
 	segID := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen))+
 		int(unsafe.Sizeof(collID))+
 		int(unsafe.Sizeof(partID)))
 	assert.Equal(t, segID, int64(-1))
 	fieldID := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen))+
 		int(unsafe.Sizeof(collID))+
 		int(unsafe.Sizeof(partID))+
 		int(unsafe.Sizeof(segID)))
 	assert.Equal(t, fieldID, int64(-1))
 	startTs := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen))+
 		int(unsafe.Sizeof(collID))+
 		int(unsafe.Sizeof(partID))+
 		int(unsafe.Sizeof(segID))+
 		int(unsafe.Sizeof(fieldID)))
 	assert.Equal(t, startTs, int64(0))
 	endTs := UnsafeReadInt64(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen))+
 		int(unsafe.Sizeof(collID))+
 		int(unsafe.Sizeof(partID))+
 		int(unsafe.Sizeof(segID))+
@@ -134,10 +117,6 @@ func TestDescriptorEvent(t *testing.T) {
 		int(unsafe.Sizeof(startTs)))
 	assert.Equal(t, endTs, int64(0))
 	colType := UnsafeReadInt32(buffer, binary.Size(eventHeader{})+
-		int(unsafe.Sizeof(binVersion))+
-		int(unsafe.Sizeof(svrVersion))+
-		int(unsafe.Sizeof(commitID))+
-		int(unsafe.Sizeof(headLen))+
 		int(unsafe.Sizeof(collID))+
 		int(unsafe.Sizeof(partID))+
 		int(unsafe.Sizeof(segID))+
@@ -147,10 +126,6 @@ func TestDescriptorEvent(t *testing.T) {
 	assert.Equal(t, colType, int32(-1))
 
 	postHeadOffset := binary.Size(eventHeader{}) +
-		int(unsafe.Sizeof(binVersion)) +
-		int(unsafe.Sizeof(svrVersion)) +
-		int(unsafe.Sizeof(commitID)) +
-		int(unsafe.Sizeof(headLen)) +
 		int(unsafe.Sizeof(collID)) +
 		int(unsafe.Sizeof(partID)) +
 		int(unsafe.Sizeof(segID)) +
@@ -167,6 +142,7 @@ func TestDescriptorEvent(t *testing.T) {
 	}
 }
 
+/* #nosec G103 */
 func TestInsertEvent(t *testing.T) {
 	insertT := func(t *testing.T,
 		dt schemapb.DataType,
@@ -177,8 +153,7 @@ func TestInsertEvent(t *testing.T) {
 	) {
 		w, err := newInsertEventWriter(dt)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = ir1(w)
 		assert.Nil(t, err)
 		err = iw(w)
@@ -195,7 +170,6 @@ func TestInsertEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, InsertEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -350,8 +324,7 @@ func TestInsertEvent(t *testing.T) {
 	t.Run("insert_string", func(t *testing.T) {
 		w, err := newInsertEventWriter(schemapb.DataType_String)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload("1234")
 		assert.Nil(t, err)
 		err = w.AddOneStringToPayload("567890")
@@ -370,7 +343,6 @@ func TestInsertEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, InsertEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -416,6 +388,7 @@ func TestInsertEvent(t *testing.T) {
 	})
 }
 
+/* #nosec G103 */
 func TestDeleteEvent(t *testing.T) {
 	deleteT := func(t *testing.T,
 		dt schemapb.DataType,
@@ -426,8 +399,7 @@ func TestDeleteEvent(t *testing.T) {
 	) {
 		w, err := newDeleteEventWriter(dt)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = ir1(w)
 		assert.Nil(t, err)
 		err = iw(w)
@@ -444,7 +416,6 @@ func TestDeleteEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, DeleteEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -599,8 +570,7 @@ func TestDeleteEvent(t *testing.T) {
 	t.Run("delete_string", func(t *testing.T) {
 		w, err := newDeleteEventWriter(schemapb.DataType_String)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload("1234")
 		assert.Nil(t, err)
 		err = w.AddOneStringToPayload("567890")
@@ -619,7 +589,6 @@ func TestDeleteEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, DeleteEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -665,6 +634,7 @@ func TestDeleteEvent(t *testing.T) {
 	})
 }
 
+/* #nosec G103 */
 func TestCreateCollectionEvent(t *testing.T) {
 	t.Run("create_event", func(t *testing.T) {
 		w, err := newCreateCollectionEventWriter(schemapb.DataType_Float)
@@ -675,8 +645,7 @@ func TestCreateCollectionEvent(t *testing.T) {
 	t.Run("create_collection_timestamp", func(t *testing.T) {
 		w, err := newCreateCollectionEventWriter(schemapb.DataType_Int64)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload([]int64{1, 2, 3})
 		assert.Nil(t, err)
 		err = w.AddDataToPayload([]int{4, 5, 6})
@@ -693,7 +662,6 @@ func TestCreateCollectionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, CreateCollectionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -722,8 +690,7 @@ func TestCreateCollectionEvent(t *testing.T) {
 	t.Run("create_collection_string", func(t *testing.T) {
 		w, err := newCreateCollectionEventWriter(schemapb.DataType_String)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload("1234")
 		assert.Nil(t, err)
 		err = w.AddOneStringToPayload("567890")
@@ -742,7 +709,6 @@ func TestCreateCollectionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, CreateCollectionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -788,6 +754,7 @@ func TestCreateCollectionEvent(t *testing.T) {
 	})
 }
 
+/* #nosec G103 */
 func TestDropCollectionEvent(t *testing.T) {
 	t.Run("drop_event", func(t *testing.T) {
 		w, err := newDropCollectionEventWriter(schemapb.DataType_Float)
@@ -798,8 +765,7 @@ func TestDropCollectionEvent(t *testing.T) {
 	t.Run("drop_collection_timestamp", func(t *testing.T) {
 		w, err := newDropCollectionEventWriter(schemapb.DataType_Int64)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload([]int64{1, 2, 3})
 		assert.Nil(t, err)
 		err = w.AddDataToPayload([]int{4, 5, 6})
@@ -816,7 +782,6 @@ func TestDropCollectionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, DropCollectionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -845,8 +810,7 @@ func TestDropCollectionEvent(t *testing.T) {
 	t.Run("drop_collection_string", func(t *testing.T) {
 		w, err := newDropCollectionEventWriter(schemapb.DataType_String)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload("1234")
 		assert.Nil(t, err)
 		err = w.AddOneStringToPayload("567890")
@@ -865,7 +829,6 @@ func TestDropCollectionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, DropCollectionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -911,6 +874,7 @@ func TestDropCollectionEvent(t *testing.T) {
 	})
 }
 
+/* #nosec G103 */
 func TestCreatePartitionEvent(t *testing.T) {
 	t.Run("create_event", func(t *testing.T) {
 		w, err := newCreatePartitionEventWriter(schemapb.DataType_Float)
@@ -921,8 +885,7 @@ func TestCreatePartitionEvent(t *testing.T) {
 	t.Run("create_partition_timestamp", func(t *testing.T) {
 		w, err := newCreatePartitionEventWriter(schemapb.DataType_Int64)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload([]int64{1, 2, 3})
 		assert.Nil(t, err)
 		err = w.AddDataToPayload([]int{4, 5, 6})
@@ -939,7 +902,6 @@ func TestCreatePartitionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, CreatePartitionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -968,8 +930,7 @@ func TestCreatePartitionEvent(t *testing.T) {
 	t.Run("create_partition_string", func(t *testing.T) {
 		w, err := newCreatePartitionEventWriter(schemapb.DataType_String)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload("1234")
 		assert.Nil(t, err)
 		err = w.AddOneStringToPayload("567890")
@@ -988,7 +949,6 @@ func TestCreatePartitionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, CreatePartitionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -1034,6 +994,7 @@ func TestCreatePartitionEvent(t *testing.T) {
 	})
 }
 
+/* #nosec G103 */
 func TestDropPartitionEvent(t *testing.T) {
 	t.Run("drop_event", func(t *testing.T) {
 		w, err := newDropPartitionEventWriter(schemapb.DataType_Float)
@@ -1044,8 +1005,7 @@ func TestDropPartitionEvent(t *testing.T) {
 	t.Run("drop_partition_timestamp", func(t *testing.T) {
 		w, err := newDropPartitionEventWriter(schemapb.DataType_Int64)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload([]int64{1, 2, 3})
 		assert.Nil(t, err)
 		err = w.AddDataToPayload([]int{4, 5, 6})
@@ -1062,7 +1022,6 @@ func TestDropPartitionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, DropPartitionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -1091,8 +1050,7 @@ func TestDropPartitionEvent(t *testing.T) {
 	t.Run("drop_partition_string", func(t *testing.T) {
 		w, err := newDropPartitionEventWriter(schemapb.DataType_String)
 		assert.Nil(t, err)
-		w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-		w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 		err = w.AddDataToPayload("1234")
 		assert.Nil(t, err)
 		err = w.AddOneStringToPayload("567890")
@@ -1111,7 +1069,6 @@ func TestDropPartitionEvent(t *testing.T) {
 		assert.Nil(t, err)
 
 		wBuf := buf.Bytes()
-		checkEventHeader(t, wBuf, DropPartitionEventType, ServerID, int32(len(wBuf)))
 		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
 		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
 		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
@@ -1156,6 +1113,44 @@ func TestDropPartitionEvent(t *testing.T) {
 		assert.Nil(t, err)
 	})
 
+}
+
+/* #nosec G103 */
+func TestIndexFileEvent(t *testing.T) {
+	t.Run("index_file_timestamp", func(t *testing.T) {
+		w, err := newIndexFileEventWriter()
+		assert.Nil(t, err)
+		w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
+
+		payload := "payload"
+		err = w.AddOneStringToPayload(payload)
+		assert.Nil(t, err)
+
+		err = w.Finish()
+		assert.Nil(t, err)
+
+		var buf bytes.Buffer
+		err = w.Write(&buf)
+		assert.Nil(t, err)
+		err = w.Close()
+		assert.Nil(t, err)
+
+		wBuf := buf.Bytes()
+		st := UnsafeReadInt64(wBuf, binary.Size(eventHeader{}))
+		assert.Equal(t, Timestamp(st), tsoutil.ComposeTS(10, 0))
+		et := UnsafeReadInt64(wBuf, binary.Size(eventHeader{})+int(unsafe.Sizeof(st)))
+		assert.Equal(t, Timestamp(et), tsoutil.ComposeTS(100, 0))
+
+		payloadOffset := binary.Size(eventHeader{}) + binary.Size(indexFileEventData{})
+		pBuf := wBuf[payloadOffset:]
+		pR, err := NewPayloadReader(schemapb.DataType_String, pBuf)
+		assert.Nil(t, err)
+		value, err := pR.GetOneStringFromPayload(0)
+		assert.Nil(t, err)
+		assert.Equal(t, payload, value)
+		err = pR.Close()
+		assert.Nil(t, err)
+	})
 }
 
 func TestDescriptorEventTsError(t *testing.T) {
@@ -1248,7 +1243,7 @@ func TestReadFixPartError(t *testing.T) {
 	assert.NotNil(t, err)
 
 	event := newDescriptorEventData()
-	err = binary.Write(buf, binary.LittleEndian, event.DescriptorEventDataFixPart)
+	err = binary.Write(buf, common.Endian, event.DescriptorEventDataFixPart)
 	assert.Nil(t, err)
 	_, err = readDescriptorEventData(buf)
 	assert.NotNil(t, err)
@@ -1290,7 +1285,7 @@ func TestEventReaderError(t *testing.T) {
 		StartTimestamp: 1000,
 		EndTimestamp:   2000,
 	}
-	err = binary.Write(buf, binary.LittleEndian, insertData)
+	err = binary.Write(buf, common.Endian, insertData)
 	assert.Nil(t, err)
 
 	r, err = newEventReader(schemapb.DataType_Int64, buf)
@@ -1302,8 +1297,7 @@ func TestEventReaderError(t *testing.T) {
 func TestEventClose(t *testing.T) {
 	w, err := newInsertEventWriter(schemapb.DataType_String)
 	assert.Nil(t, err)
-	w.SetStartTimestamp(tsoutil.ComposeTS(10, 0))
-	w.SetEndTimestamp(tsoutil.ComposeTS(100, 0))
+	w.SetEventTimestamp(tsoutil.ComposeTS(10, 0), tsoutil.ComposeTS(100, 0))
 	err = w.AddDataToPayload("1234")
 	assert.Nil(t, err)
 	err = w.Finish()
@@ -1324,8 +1318,33 @@ func TestEventClose(t *testing.T) {
 	err = r.Close()
 	assert.Nil(t, err)
 
-	_, err = r.readHeader()
+	err = r.readHeader()
 	assert.NotNil(t, err)
-	_, err = r.readData()
+	err = r.readData()
+	assert.NotNil(t, err)
+}
+
+func TestIndexFileEventDataError(t *testing.T) {
+	var err error
+	var buffer bytes.Buffer
+
+	event := newIndexFileEventData()
+
+	event.SetEventTimestamp(0, 1)
+	// start timestamp not set
+	err = event.WriteEventData(&buffer)
+	assert.NotNil(t, err)
+
+	event.SetEventTimestamp(1, 0)
+	// end timestamp not set
+	err = event.WriteEventData(&buffer)
+	assert.NotNil(t, err)
+}
+
+func TestReadIndexFileEventDataFixPart(t *testing.T) {
+	var err error
+	var buffer bytes.Buffer
+	// buffer is empty
+	_, err = readIndexFileEventDataFixPart(&buffer)
 	assert.NotNil(t, err)
 }

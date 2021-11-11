@@ -19,36 +19,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 
+	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
 	"github.com/milvus-io/milvus/internal/msgstream"
 	"github.com/milvus-io/milvus/internal/proto/commonpb"
 	"github.com/milvus-io/milvus/internal/proto/etcdpb"
-	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/proto/querypb"
 	"github.com/milvus-io/milvus/internal/proto/schemapb"
 	"github.com/milvus-io/milvus/internal/types"
 )
 
-const ctxTimeInMillisecond = 5000
-const debug = false
-
-const defaultPartitionID = UniqueID(2021)
-
-type queryServiceMock struct {
-	types.QueryService
+// mock of query coordinator client
+type queryCoordMock struct {
+	types.QueryCoord
 }
 
 func setup() {
 	os.Setenv("QUERY_NODE_ID", "1")
 	Params.Init()
-	//Params.QueryNodeID = 1
-	Params.initQueryTimeTickChannelName()
-	Params.initStatsChannelName()
 	Params.MetaRootPath = "/etcd/test/root/querynode"
 }
 
-func genTestCollectionMeta(collectionID UniqueID, isBinary bool) *etcdpb.CollectionInfo {
+func genTestCollectionSchema(collectionID UniqueID, isBinary bool, dim int) *schemapb.CollectionSchema {
 	var fieldVec schemapb.FieldSchema
 	if isBinary {
 		fieldVec = schemapb.FieldSchema{
@@ -59,7 +53,7 @@ func genTestCollectionMeta(collectionID UniqueID, isBinary bool) *etcdpb.Collect
 			TypeParams: []*commonpb.KeyValuePair{
 				{
 					Key:   "dim",
-					Value: "128",
+					Value: strconv.Itoa(dim * 8),
 				},
 			},
 			IndexParams: []*commonpb.KeyValuePair{
@@ -78,7 +72,7 @@ func genTestCollectionMeta(collectionID UniqueID, isBinary bool) *etcdpb.Collect
 			TypeParams: []*commonpb.KeyValuePair{
 				{
 					Key:   "dim",
-					Value: "16",
+					Value: strconv.Itoa(dim),
 				},
 			},
 			IndexParams: []*commonpb.KeyValuePair{
@@ -97,16 +91,41 @@ func genTestCollectionMeta(collectionID UniqueID, isBinary bool) *etcdpb.Collect
 		DataType:     schemapb.DataType_Int32,
 	}
 
-	schema := schemapb.CollectionSchema{
+	schema := &schemapb.CollectionSchema{
 		AutoID: true,
 		Fields: []*schemapb.FieldSchema{
 			&fieldVec, &fieldInt,
 		},
 	}
 
+	return schema
+}
+
+func genTestCollectionMeta(collectionID UniqueID, isBinary bool) *etcdpb.CollectionInfo {
+	schema := genTestCollectionSchema(collectionID, isBinary, 16)
+
 	collectionMeta := etcdpb.CollectionInfo{
 		ID:           collectionID,
-		Schema:       &schema,
+		Schema:       schema,
+		CreateTime:   Timestamp(0),
+		PartitionIDs: []UniqueID{defaultPartitionID},
+	}
+
+	return &collectionMeta
+}
+
+func genTestCollectionMetaWithPK(collectionID UniqueID, isBinary bool) *etcdpb.CollectionInfo {
+	schema := genTestCollectionSchema(collectionID, isBinary, 16)
+	schema.Fields = append(schema.Fields, &schemapb.FieldSchema{
+		FieldID:      UniqueID(0),
+		Name:         "id",
+		IsPrimaryKey: true,
+		DataType:     schemapb.DataType_Int64,
+	})
+
+	collectionMeta := etcdpb.CollectionInfo{
+		ID:           collectionID,
+		Schema:       schema,
 		CreateTime:   Timestamp(0),
 		PartitionIDs: []UniqueID{defaultPartitionID},
 	}
@@ -121,29 +140,19 @@ func initTestMeta(t *testing.T, node *QueryNode, collectionID UniqueID, segmentI
 	}
 	collectionMeta := genTestCollectionMeta(collectionID, isBinary)
 
-	var err = node.replica.addCollection(collectionMeta.ID, collectionMeta.Schema)
+	var err = node.historical.replica.addCollection(collectionMeta.ID, collectionMeta.Schema)
 	assert.NoError(t, err)
 
-	collection, err := node.replica.getCollectionByID(collectionID)
+	collection, err := node.historical.replica.getCollectionByID(collectionID)
 	assert.NoError(t, err)
 	assert.Equal(t, collection.ID(), collectionID)
-	assert.Equal(t, node.replica.getCollectionNum(), 1)
+	assert.Equal(t, node.historical.replica.getCollectionNum(), 1)
 
-	err = node.replica.addPartition(collection.ID(), collectionMeta.PartitionIDs[0])
+	err = node.historical.replica.addPartition(collection.ID(), collectionMeta.PartitionIDs[0])
 	assert.NoError(t, err)
 
-	err = node.replica.addSegment(segmentID, collectionMeta.PartitionIDs[0], collectionID, segmentTypeGrowing)
+	err = node.historical.replica.addSegment(segmentID, collectionMeta.PartitionIDs[0], collectionID, "", segmentTypeGrowing, true)
 	assert.NoError(t, err)
-}
-
-func initDmChannel(ctx context.Context, insertChannels []string, node *QueryNode) {
-	watchReq := &querypb.WatchDmChannelsRequest{
-		ChannelIDs: insertChannels,
-	}
-	_, err := node.WatchDmChannels(ctx, watchReq)
-	if err != nil {
-		panic(err)
-	}
 }
 
 func initSearchChannel(ctx context.Context, searchChan string, resultChan string, node *QueryNode) {
@@ -173,12 +182,23 @@ func newQueryNodeMock() *QueryNode {
 		}()
 	}
 
-	msFactory := msgstream.NewPmsFactory()
-	svr := NewQueryNode(ctx, Params.QueryNodeID, msFactory)
-	err := svr.SetQueryService(&queryServiceMock{})
+	etcdKV, err := etcdkv.NewEtcdKV(Params.EtcdEndpoints, Params.MetaRootPath)
 	if err != nil {
 		panic(err)
 	}
+
+	msFactory, err := newMessageStreamFactory()
+	if err != nil {
+		panic(err)
+	}
+	svr := NewQueryNode(ctx, msFactory)
+	tsReplica := newTSafeReplica()
+	streamingReplica := newCollectionReplica(etcdKV)
+	historicalReplica := newCollectionReplica(etcdKV)
+	svr.historical = newHistorical(svr.queryNodeLoopCtx, historicalReplica, nil, nil, svr.msFactory, etcdKV, tsReplica)
+	svr.streaming = newStreaming(ctx, streamingReplica, msFactory, etcdKV, tsReplica)
+	svr.dataSyncService = newDataSyncService(ctx, svr.streaming.replica, svr.historical.replica, tsReplica, msFactory)
+	svr.etcdKV = etcdKV
 
 	return svr
 }
@@ -189,22 +209,6 @@ func makeNewChannelNames(names []string, suffix string) []string {
 		ret = append(ret, name+suffix)
 	}
 	return ret
-}
-
-func refreshChannelNames() {
-	suffix := "-test-query-node" + strconv.FormatInt(rand.Int63n(1000000), 10)
-	Params.StatsChannelName = Params.StatsChannelName + suffix
-}
-
-func (q *queryServiceMock) RegisterNode(ctx context.Context, req *querypb.RegisterNodeRequest) (*querypb.RegisterNodeResponse, error) {
-	return &querypb.RegisterNodeResponse{
-		Status: &commonpb.Status{
-			ErrorCode: commonpb.ErrorCode_Success,
-		},
-		InitParams: &internalpb.InitParams{
-			NodeID: int64(1),
-		},
-	}, nil
 }
 
 func newMessageStreamFactory() (msgstream.Factory, error) {
@@ -222,7 +226,7 @@ func newMessageStreamFactory() (msgstream.Factory, error) {
 
 func TestMain(m *testing.M) {
 	setup()
-	refreshChannelNames()
+	Params.StatsChannelName = Params.StatsChannelName + strconv.Itoa(rand.Int())
 	exitCode := m.Run()
 	os.Exit(exitCode)
 }
@@ -233,4 +237,178 @@ func TestQueryNode_Start(t *testing.T) {
 	localNode.Start()
 	<-localNode.queryNodeLoopCtx.Done()
 	localNode.Stop()
+}
+
+func TestQueryNode_SetCoord(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, err := genSimpleQueryNode(ctx)
+	assert.NoError(t, err)
+
+	err = node.SetIndexCoord(nil)
+	assert.Error(t, err)
+
+	err = node.SetRootCoord(nil)
+	assert.Error(t, err)
+
+	// TODO: add mock coords
+	//err = node.SetIndexCoord(newIndexCorrd)
+}
+
+func TestQueryNode_register(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, err := genSimpleQueryNode(ctx)
+	assert.NoError(t, err)
+
+	err = node.Register()
+	assert.NoError(t, err)
+}
+
+func TestQueryNode_init(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, err := genSimpleQueryNode(ctx)
+	assert.NoError(t, err)
+
+	err = node.Init()
+	assert.NoError(t, err)
+}
+
+func genSimpleQueryNodeToTestWatchChangeInfo(ctx context.Context) (*QueryNode, error) {
+	node, err := genSimpleQueryNode(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	err = node.queryService.addQueryCollection(defaultCollectionID)
+	if err != nil {
+		return nil, err
+	}
+
+	qc, err := node.queryService.getQueryCollection(defaultCollectionID)
+	if err != nil {
+		return nil, err
+	}
+	err = qc.globalSegmentManager.addGlobalSegmentInfo(genSimpleSegmentInfo())
+	if err != nil {
+		return nil, err
+	}
+
+	return node, nil
+}
+
+func TestQueryNode_waitChangeInfo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+	assert.NoError(t, err)
+
+	err = node.waitChangeInfo(genSimpleChangeInfo())
+	assert.NoError(t, err)
+}
+
+func TestQueryNode_adjustByChangeInfo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Run("test adjustByChangeInfo", func(t *testing.T) {
+		node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+		assert.NoError(t, err)
+
+		err = node.adjustByChangeInfo(genSimpleChangeInfo())
+		assert.NoError(t, err)
+	})
+
+	t.Run("test adjustByChangeInfo no segment", func(t *testing.T) {
+		node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+		assert.NoError(t, err)
+
+		err = node.historical.replica.removeSegment(defaultSegmentID)
+		assert.NoError(t, err)
+
+		segmentChangeInfos := genSimpleChangeInfo()
+		segmentChangeInfos.Infos[0].OnlineSegments = nil
+		segmentChangeInfos.Infos[0].OfflineNodeID = Params.QueryNodeID
+
+		qc, err := node.queryService.getQueryCollection(defaultCollectionID)
+		assert.NoError(t, err)
+		qc.globalSegmentManager.removeGlobalSegmentInfo(defaultSegmentID)
+
+		err = node.adjustByChangeInfo(segmentChangeInfos)
+		assert.Error(t, err)
+	})
+}
+
+func TestQueryNode_watchChangeInfo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Run("test watchChangeInfo", func(t *testing.T) {
+		node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+		assert.NoError(t, err)
+
+		go node.watchChangeInfo()
+
+		info := genSimpleSegmentInfo()
+		value, err := proto.Marshal(info)
+		assert.NoError(t, err)
+		err = saveChangeInfo("0", string(value))
+		assert.NoError(t, err)
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	t.Run("test watchChangeInfo key error", func(t *testing.T) {
+		node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+		assert.NoError(t, err)
+
+		go node.watchChangeInfo()
+
+		err = saveChangeInfo("*$&#%^^", "%EUY%&#^$%&@")
+		assert.NoError(t, err)
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	t.Run("test watchChangeInfo unmarshal error", func(t *testing.T) {
+		node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+		assert.NoError(t, err)
+
+		go node.watchChangeInfo()
+
+		err = saveChangeInfo("0", "$%^$*&%^#$&*")
+		assert.NoError(t, err)
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	t.Run("test watchChangeInfo adjustByChangeInfo error", func(t *testing.T) {
+		node, err := genSimpleQueryNodeToTestWatchChangeInfo(ctx)
+		assert.NoError(t, err)
+
+		err = node.historical.replica.removeSegment(defaultSegmentID)
+		assert.NoError(t, err)
+
+		segmentChangeInfos := genSimpleChangeInfo()
+		segmentChangeInfos.Infos[0].OnlineSegments = nil
+		segmentChangeInfos.Infos[0].OfflineNodeID = Params.QueryNodeID
+
+		qc, err := node.queryService.getQueryCollection(defaultCollectionID)
+		assert.NoError(t, err)
+		qc.globalSegmentManager.removeGlobalSegmentInfo(defaultSegmentID)
+
+		go node.watchChangeInfo()
+
+		value, err := proto.Marshal(segmentChangeInfos)
+		assert.NoError(t, err)
+		err = saveChangeInfo("0", string(value))
+		assert.NoError(t, err)
+
+		time.Sleep(100 * time.Millisecond)
+	})
 }

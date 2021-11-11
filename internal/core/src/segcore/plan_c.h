@@ -15,21 +15,23 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "segcore/collection_c.h"
-#include "common/type_c.h"
 
-typedef void* CPlan;
+#include "common/type_c.h"
+#include "segcore/collection_c.h"
+
+typedef void* CSearchPlan;
 typedef void* CPlaceholderGroup;
+typedef void* CRetrievePlan;
 
 CStatus
-CreatePlan(CCollection col, const char* dsl, CPlan* res_plan);
+CreateSearchPlan(CCollection col, const char* dsl, CSearchPlan* res_plan);
 
 // Note: serialized_expr_plan is of binary format
 CStatus
-CreatePlanByExpr(CCollection col, const char* serialized_expr_plan, int64_t size, CPlan* res_plan);
+CreateSearchPlanByExpr(CCollection col, const char* serialized_expr_plan, int64_t size, CSearchPlan* res_plan);
 
 CStatus
-ParsePlaceholderGroup(CPlan plan,
+ParsePlaceholderGroup(CSearchPlan plan,
                       void* placeholder_group_blob,
                       int64_t blob_size,
                       CPlaceholderGroup* res_placeholder_group);
@@ -38,16 +40,25 @@ int64_t
 GetNumOfQueries(CPlaceholderGroup placeholder_group);
 
 int64_t
-GetTopK(CPlan plan);
+GetTopK(CSearchPlan plan);
 
 const char*
-GetMetricType(CPlan plan);
+GetMetricType(CSearchPlan plan);
 
 void
-DeletePlan(CPlan plan);
+DeleteSearchPlan(CSearchPlan plan);
 
 void
 DeletePlaceholderGroup(CPlaceholderGroup placeholder_group);
+
+CStatus
+CreateRetrievePlan(CCollection c_col, CProto retrieve_request, CRetrievePlan* output);
+
+CStatus
+CreateRetrievePlanByExpr(CCollection c_col, const char* serialized_expr_plan, int64_t size, CRetrievePlan* res_plan);
+
+void
+DeleteRetrievePlan(CRetrievePlan plan);
 
 #ifdef __cplusplus
 }

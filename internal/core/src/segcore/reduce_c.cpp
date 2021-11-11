@@ -9,15 +9,21 @@
 // is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
 // or implied. See the License for the specific language governing permissions and limitations under the License
 
+#include <unordered_set>
 #include <vector>
-#include <exceptions/EasyAssert.h>
+
+#include "common/Consts.h"
+#include "common/Types.h"
+#include "exceptions/EasyAssert.h"
+#include "log/Log.h"
+#include "pb/milvus.pb.h"
+#include "query/Plan.h"
+#include "segcore/Reduce.h"
+#include "segcore/ReduceStructure.h"
+#include "segcore/SegmentInterface.h"
 #include "segcore/reduce_c.h"
 
-#include "segcore/Reduce.h"
-#include "common/Types.h"
-#include "pb/milvus.pb.h"
-
-using SearchResult = milvus::QueryResult;
+using SearchResult = milvus::SearchResult;
 
 int
 MergeInto(int64_t num_queries, int64_t topk, float* distances, int64_t* uids, float* new_distances, int64_t* new_uids) {
@@ -25,7 +31,7 @@ MergeInto(int64_t num_queries, int64_t topk, float* distances, int64_t* uids, fl
     return status.code();
 }
 
-struct MarshaledHitsPeerGroup {
+struct MarshaledHitsPerGroup {
     std::vector<std::string> hits_;
     std::vector<int64_t> blob_length_;
 };
@@ -40,7 +46,7 @@ struct MarshaledHits {
         return marshaled_hits_.size();
     }
 
-    std::vector<MarshaledHitsPeerGroup> marshaled_hits_;
+    std::vector<MarshaledHitsPerGroup> marshaled_hits_;
 };
 
 void
@@ -49,106 +55,130 @@ DeleteMarshaledHits(CMarshaledHits c_marshaled_hits) {
     delete hits;
 }
 
-struct SearchResultPair {
-    float distance_;
-    SearchResult* search_result_;
-    int64_t offset_;
-    int64_t index_;
-
-    SearchResultPair(float distance, SearchResult* search_result, int64_t offset, int64_t index)
-        : distance_(distance), search_result_(search_result), offset_(offset), index_(index) {
-    }
-
-    bool
-    operator<(const SearchResultPair& pair) const {
-        return (distance_ < pair.distance_);
-    }
-
-    bool
-    operator>(const SearchResultPair& pair) const {
-        return (distance_ > pair.distance_);
-    }
-
-    void
-    reset_distance() {
-        distance_ = search_result_->result_distances_[offset_];
-    }
-};
+// void
+// PrintSearchResult(char* buf, const milvus::SearchResult* result, int64_t seg_idx, int64_t from, int64_t to) {
+//    const int64_t MAXLEN = 32;
+//    snprintf(buf + strlen(buf), MAXLEN, "{ seg No.%ld ", seg_idx);
+//    for (int64_t i = from; i < to; i++) {
+//        snprintf(buf + strlen(buf), MAXLEN, "(%ld, %ld, %f), ", i, result->primary_keys_[i],
+//                 result->result_distances_[i]);
+//    }
+//    snprintf(buf + strlen(buf), MAXLEN, "} ");
+//}
 
 void
-GetResultData(std::vector<std::vector<int64_t>>& search_records,
-              std::vector<SearchResult*>& search_results,
-              int64_t query_offset,
-              bool* is_selected,
-              int64_t topk) {
-    auto num_segments = search_results.size();
-    AssertInfo(num_segments > 0, "num segment must greater than 0");
-    std::vector<SearchResultPair> result_pairs;
-    for (int j = 0; j < num_segments; ++j) {
-        auto distance = search_results[j]->result_distances_[query_offset];
-        auto search_result = search_results[j];
-        AssertInfo(search_result != nullptr, "search result must not equal to nullptr");
-        result_pairs.push_back(SearchResultPair(distance, search_result, query_offset, j));
-    }
-    int64_t loc_offset = query_offset;
-    AssertInfo(topk > 0, "topK must greater than 0");
-    for (int i = 0; i < topk; ++i) {
-        result_pairs[0].reset_distance();
-        std::sort(result_pairs.begin(), result_pairs.end(), std::greater<>());
-        auto& result_pair = result_pairs[0];
-        auto index = result_pair.index_;
-        is_selected[index] = true;
-        result_pair.search_result_->result_offsets_.push_back(loc_offset++);
-        search_records[index].push_back(result_pair.offset_++);
-    }
-}
-
-void
-ResetSearchResult(std::vector<std::vector<int64_t>>& search_records,
-                  std::vector<SearchResult*>& search_results,
-                  bool* is_selected) {
+ReduceResultData(std::vector<SearchResult*>& search_results, int64_t nq, int64_t topk) {
+    AssertInfo(topk > 0, "topk must greater than 0");
     auto num_segments = search_results.size();
     AssertInfo(num_segments > 0, "num segment must greater than 0");
     for (int i = 0; i < num_segments; i++) {
-        if (is_selected[i] == false) {
-            continue;
-        }
         auto search_result = search_results[i];
         AssertInfo(search_result != nullptr, "search result must not equal to nullptr");
+        AssertInfo(search_result->primary_keys_.size() == nq * topk, "incorrect search result primary key size");
+        AssertInfo(search_result->result_distances_.size() == nq * topk, "incorrect search result distance size");
+    }
 
-        std::vector<float> result_distances;
-        std::vector<int64_t> internal_seg_offsets;
+    std::vector<std::vector<int64_t>> search_records(num_segments);
+    std::unordered_set<int64_t> pk_set;
+    int64_t skip_dup_cnt = 0;
 
-        for (int j = 0; j < search_records[i].size(); j++) {
-            auto& offset = search_records[i][j];
-            auto distance = search_result->result_distances_[offset];
-            auto internal_seg_offset = search_result->internal_seg_offsets_[offset];
-            result_distances.push_back(distance);
-            internal_seg_offsets.push_back(internal_seg_offset);
+    // reduce search results
+    for (int64_t qi = 0; qi < nq; qi++) {
+        std::vector<SearchResultPair> result_pairs;
+        int64_t base_offset = qi * topk;
+        for (int i = 0; i < num_segments; i++) {
+            auto search_result = search_results[i];
+            auto primary_key = search_result->primary_keys_[base_offset];
+            auto distance = search_result->result_distances_[base_offset];
+            result_pairs.push_back(
+                SearchResultPair(primary_key, distance, search_result, i, base_offset, base_offset + topk));
+        }
+        int64_t curr_offset = base_offset;
+
+#if 0
+        for (int i = 0; i < topk; ++i) {
+            result_pairs[0].reset_distance();
+            std::sort(result_pairs.begin(), result_pairs.end(), std::greater<>());
+            auto& result_pair = result_pairs[0];
+            auto index = result_pair.index_;
+            result_pair.search_result_->result_offsets_.push_back(loc_offset++);
+            search_records[index].push_back(result_pair.offset_++);
+        }
+#else
+        pk_set.clear();
+        while (curr_offset - base_offset < topk) {
+            std::sort(result_pairs.begin(), result_pairs.end(), std::greater<>());
+            auto& pilot = result_pairs[0];
+            auto index = pilot.index_;
+            int64_t curr_pk = pilot.primary_key_;
+            // remove duplicates
+            if (curr_pk == INVALID_ID || pk_set.count(curr_pk) == 0) {
+                pilot.search_result_->result_offsets_.push_back(curr_offset++);
+                // when inserted data are dirty, it's possible that primary keys are duplicated,
+                // in this case, "offset_" may be greater than "offset_rb_" (#10530)
+                search_records[index].push_back(pilot.offset_ < pilot.offset_rb_ ? pilot.offset_ : INVALID_OFFSET);
+                if (curr_pk != INVALID_ID) {
+                    pk_set.insert(curr_pk);
+                }
+            } else {
+                // skip entity with same primary key
+                skip_dup_cnt++;
+            }
+            pilot.reset();
+        }
+#endif
+    }
+    LOG_SEGCORE_DEBUG_ << "skip duplicated search result, count = " << skip_dup_cnt;
+
+    // after reduce, remove redundant values in primary_keys, result_distances and internal_seg_offsets
+    for (int i = 0; i < num_segments; i++) {
+        auto search_result = search_results[i];
+        if (search_result->result_offsets_.size() == 0) {
+            continue;
         }
 
+        std::vector<int64_t> primary_keys;
+        std::vector<float> result_distances;
+        std::vector<int64_t> internal_seg_offsets;
+        for (int j = 0; j < search_records[i].size(); j++) {
+            auto& offset = search_records[i][j];
+            primary_keys.push_back(offset != INVALID_OFFSET ? search_result->primary_keys_[offset] : INVALID_ID);
+            result_distances.push_back(offset != INVALID_OFFSET ? search_result->result_distances_[offset] : MAXFLOAT);
+            internal_seg_offsets.push_back(offset != INVALID_OFFSET ? search_result->internal_seg_offsets_[offset]
+                                                                    : INVALID_SEG_OFFSET);
+        }
+
+        search_result->primary_keys_ = primary_keys;
         search_result->result_distances_ = result_distances;
         search_result->internal_seg_offsets_ = internal_seg_offsets;
     }
 }
 
 CStatus
-ReduceQueryResults(CQueryResult* c_search_results, int64_t num_segments, bool* is_selected) {
+ReduceSearchResultsAndFillData(CSearchPlan c_plan, CSearchResult* c_search_results, int64_t num_segments) {
     try {
+        auto plan = (milvus::query::Plan*)c_plan;
         std::vector<SearchResult*> search_results;
         for (int i = 0; i < num_segments; ++i) {
             search_results.push_back((SearchResult*)c_search_results[i]);
         }
-        auto topk = search_results[0]->topK_;
+        auto topk = search_results[0]->topk_;
         auto num_queries = search_results[0]->num_queries_;
-        std::vector<std::vector<int64_t>> search_records(num_segments);
 
-        int64_t query_offset = 0;
-        for (int j = 0; j < num_queries; ++j) {
-            GetResultData(search_records, search_results, query_offset, is_selected, topk);
-            query_offset += topk;
+        // get primary keys for duplicates removal
+        for (auto& search_result : search_results) {
+            auto segment = (milvus::segcore::SegmentInterface*)(search_result->segment_);
+            segment->FillPrimaryKeys(plan, *search_result);
         }
-        ResetSearchResult(search_records, search_results, is_selected);
+
+        ReduceResultData(search_results, num_queries, topk);
+
+        // fill in other entities
+        for (auto& search_result : search_results) {
+            auto segment = (milvus::segcore::SegmentInterface*)(search_result->segment_);
+            segment->FillTargetEntry(plan, *search_result);
+        }
+
         auto status = CStatus();
         status.error_code = Success;
         status.error_msg = "";
@@ -162,43 +192,29 @@ ReduceQueryResults(CQueryResult* c_search_results, int64_t num_segments, bool* i
 }
 
 CStatus
-ReorganizeQueryResults(CMarshaledHits* c_marshaled_hits,
-                       CPlaceholderGroup* c_placeholder_groups,
-                       int64_t num_groups,
-                       CQueryResult* c_search_results,
-                       bool* is_selected,
-                       int64_t num_segments,
-                       CPlan c_plan) {
+ReorganizeSearchResults(CMarshaledHits* c_marshaled_hits, CSearchResult* c_search_results, int64_t num_segments) {
     try {
-        auto marshaledHits = std::make_unique<MarshaledHits>(num_groups);
-        auto topk = GetTopK(c_plan);
-        std::vector<int64_t> num_queries_peer_group(num_groups);
-        int64_t total_num_queries = 0;
-        for (int i = 0; i < num_groups; i++) {
-            auto num_queries = GetNumOfQueries(c_placeholder_groups[i]);
-            num_queries_peer_group[i] = num_queries;
-            total_num_queries += num_queries;
-        }
+        auto marshaledHits = std::make_unique<MarshaledHits>(1);
+        auto sr = (SearchResult*)c_search_results[0];
+        auto topk = sr->topk_;
+        auto num_queries = sr->num_queries_;
 
-        std::vector<float> result_distances(total_num_queries * topk);
-        std::vector<int64_t> result_ids(total_num_queries * topk);
-        std::vector<std::vector<char>> row_datas(total_num_queries * topk);
-        std::vector<char> temp_ids;
+        std::vector<float> result_distances(num_queries * topk);
+        std::vector<std::vector<char>> row_datas(num_queries * topk);
 
         std::vector<int64_t> counts(num_segments);
         for (int i = 0; i < num_segments; i++) {
-            if (is_selected[i] == false) {
-                continue;
-            }
             auto search_result = (SearchResult*)c_search_results[i];
             AssertInfo(search_result != nullptr, "search result must not equal to nullptr");
             auto size = search_result->result_offsets_.size();
+            if (size == 0) {
+                continue;
+            }
 #pragma omp parallel for
             for (int j = 0; j < size; j++) {
                 auto loc = search_result->result_offsets_[j];
                 result_distances[loc] = search_result->result_distances_[j];
                 row_datas[loc] = search_result->row_data_[j];
-                memcpy(&result_ids[loc], search_result->row_data_[j].data(), sizeof(int64_t));
             }
             counts[i] = size;
         }
@@ -207,100 +223,35 @@ ReorganizeQueryResults(CMarshaledHits* c_marshaled_hits,
         for (int i = 0; i < num_segments; i++) {
             total_count += counts[i];
         }
-        AssertInfo(total_count == total_num_queries * topk,
-                   "the reduces result's size less than total_num_queries*topk");
+        AssertInfo(total_count == num_queries * topk, "the reduces result's size less than total_num_queries*topk");
 
-        int64_t last_offset = 0;
-        for (int i = 0; i < num_groups; i++) {
-            MarshaledHitsPeerGroup& hits_peer_group = (*marshaledHits).marshaled_hits_[i];
-            hits_peer_group.hits_.resize(num_queries_peer_group[i]);
-            hits_peer_group.blob_length_.resize(num_queries_peer_group[i]);
-            std::vector<milvus::proto::milvus::Hits> hits(num_queries_peer_group[i]);
+        MarshaledHitsPerGroup& hits_per_group = (*marshaledHits).marshaled_hits_[0];
+        hits_per_group.hits_.resize(num_queries);
+        hits_per_group.blob_length_.resize(num_queries);
+        std::vector<milvus::proto::milvus::Hits> hits(num_queries);
 #pragma omp parallel for
-            for (int m = 0; m < num_queries_peer_group[i]; m++) {
-                for (int n = 0; n < topk; n++) {
-                    int64_t result_offset = last_offset + m * topk + n;
-                    hits[m].add_ids(result_ids[result_offset]);
-                    hits[m].add_scores(result_distances[result_offset]);
-                    auto& row_data = row_datas[result_offset];
-                    hits[m].add_row_data(row_data.data(), row_data.size());
-                }
+        for (int m = 0; m < num_queries; m++) {
+            for (int n = 0; n < topk; n++) {
+                int64_t result_offset = m * topk + n;
+                hits[m].add_scores(result_distances[result_offset]);
+                auto& row_data = row_datas[result_offset];
+                hits[m].add_row_data(row_data.data(), row_data.size());
+                hits[m].add_ids(*(int64_t*)row_data.data());
             }
-            last_offset = last_offset + num_queries_peer_group[i] * topk;
+        }
 
 #pragma omp parallel for
-            for (int j = 0; j < num_queries_peer_group[i]; j++) {
-                auto blob = hits[j].SerializeAsString();
-                hits_peer_group.hits_[j] = blob;
-                hits_peer_group.blob_length_[j] = blob.size();
-            }
+        for (int j = 0; j < num_queries; j++) {
+            auto blob = hits[j].SerializeAsString();
+            hits_per_group.hits_[j] = blob;
+            hits_per_group.blob_length_[j] = blob.size();
         }
 
         auto status = CStatus();
         status.error_code = Success;
         status.error_msg = "";
-        auto marshled_res = (CMarshaledHits)marshaledHits.release();
-        *c_marshaled_hits = marshled_res;
-        return status;
-    } catch (std::exception& e) {
-        auto status = CStatus();
-        status.error_code = UnexpectedError;
-        status.error_msg = strdup(e.what());
-        *c_marshaled_hits = nullptr;
-        return status;
-    }
-}
-
-CStatus
-ReorganizeSingleQueryResult(CMarshaledHits* c_marshaled_hits,
-                            CPlaceholderGroup* c_placeholder_groups,
-                            int64_t num_groups,
-                            CQueryResult c_search_result,
-                            CPlan c_plan) {
-    try {
-        auto marshaledHits = std::make_unique<MarshaledHits>(num_groups);
-        auto search_result = (SearchResult*)c_search_result;
-        auto topk = GetTopK(c_plan);
-        std::vector<int64_t> num_queries_peer_group;
-        int64_t total_num_queries = 0;
-        for (int i = 0; i < num_groups; i++) {
-            auto num_queries = GetNumOfQueries(c_placeholder_groups[i]);
-            num_queries_peer_group.push_back(num_queries);
-        }
-
-        int64_t last_offset = 0;
-        for (int i = 0; i < num_groups; i++) {
-            MarshaledHitsPeerGroup& hits_peer_group = (*marshaledHits).marshaled_hits_[i];
-            hits_peer_group.hits_.resize(num_queries_peer_group[i]);
-            hits_peer_group.blob_length_.resize(num_queries_peer_group[i]);
-            std::vector<milvus::proto::milvus::Hits> hits(num_queries_peer_group[i]);
-#pragma omp parallel for
-            for (int m = 0; m < num_queries_peer_group[i]; m++) {
-                for (int n = 0; n < topk; n++) {
-                    int64_t result_offset = last_offset + m * topk + n;
-                    hits[m].add_scores(search_result->result_distances_[result_offset]);
-                    auto& row_data = search_result->row_data_[result_offset];
-                    hits[m].add_row_data(row_data.data(), row_data.size());
-                    int64_t result_id;
-                    memcpy(&result_id, row_data.data(), sizeof(int64_t));
-                    hits[m].add_ids(result_id);
-                }
-            }
-            last_offset = last_offset + num_queries_peer_group[i] * topk;
-
-#pragma omp parallel for
-            for (int j = 0; j < num_queries_peer_group[i]; j++) {
-                auto blob = hits[j].SerializeAsString();
-                hits_peer_group.hits_[j] = blob;
-                hits_peer_group.blob_length_[j] = blob.size();
-            }
-        }
-
-        auto status = CStatus();
-        status.error_code = Success;
-        status.error_msg = "";
-        auto marshled_res = (CMarshaledHits)marshaledHits.release();
-        *c_marshaled_hits = marshled_res;
+        auto marshaled_res = (CMarshaledHits)marshaledHits.release();
+        *c_marshaled_hits = marshaled_res;
         return status;
     } catch (std::exception& e) {
         auto status = CStatus();
@@ -343,14 +294,14 @@ GetHitsBlob(CMarshaledHits c_marshaled_hits, const void* hits) {
 }
 
 int64_t
-GetNumQueriesPeerGroup(CMarshaledHits c_marshaled_hits, int64_t group_index) {
+GetNumQueriesPerGroup(CMarshaledHits c_marshaled_hits, int64_t group_index) {
     auto marshaled_hits = (MarshaledHits*)c_marshaled_hits;
     auto& hits = marshaled_hits->marshaled_hits_[group_index].hits_;
     return hits.size();
 }
 
 void
-GetHitSizePeerQueries(CMarshaledHits c_marshaled_hits, int64_t group_index, int64_t* hit_size_peer_query) {
+GetHitSizePerQueries(CMarshaledHits c_marshaled_hits, int64_t group_index, int64_t* hit_size_peer_query) {
     auto marshaled_hits = (MarshaledHits*)c_marshaled_hits;
     auto& blob_lens = marshaled_hits->marshaled_hits_[group_index].blob_length_;
     for (int i = 0; i < blob_lens.size(); i++) {

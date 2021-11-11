@@ -14,18 +14,20 @@ package querynode
 import (
 	"context"
 
+	"go.uber.org/zap"
+
 	"github.com/milvus-io/milvus/internal/log"
 	"github.com/milvus-io/milvus/internal/msgstream"
-	"github.com/milvus-io/milvus/internal/proto/commonpb"
-	"github.com/milvus-io/milvus/internal/proto/internalpb"
 	"github.com/milvus-io/milvus/internal/util/flowgraph"
-	"go.uber.org/zap"
 )
 
 type serviceTimeNode struct {
 	baseNode
+	loadType          loadType
 	collectionID      UniqueID
-	replica           ReplicaInterface
+	partitionID       UniqueID
+	vChannel          Channel
+	tSafeReplica      TSafeReplicaInterface
 	timeTickMsgStream msgstream.MsgStream
 }
 
@@ -34,6 +36,7 @@ func (stNode *serviceTimeNode) Name() string {
 }
 
 func (stNode *serviceTimeNode) Close() {
+	// `Close` needs to be invoked to close producers
 	stNode.timeTickMsgStream.Close()
 }
 
@@ -47,7 +50,7 @@ func (stNode *serviceTimeNode) Operate(in []flowgraph.Msg) []flowgraph.Msg {
 
 	serviceTimeMsg, ok := in[0].(*serviceTimeMsg)
 	if !ok {
-		log.Error("type assertion failed for serviceTimeMsg")
+		log.Warn("type assertion failed for serviceTimeMsg")
 		// TODO: add error handling
 	}
 
@@ -56,47 +59,59 @@ func (stNode *serviceTimeNode) Operate(in []flowgraph.Msg) []flowgraph.Msg {
 	}
 
 	// update service time
-	ts := stNode.replica.getTSafe(stNode.collectionID)
-	if ts != nil {
-		ts.set(serviceTimeMsg.timeRange.timestampMax)
-		//log.Debug("update tSafe:",
-		//	zap.Int64("tSafe", int64(serviceTimeMsg.timeRange.timestampMax)),
-		//	zap.Int64("collectionID", stNode.collectionID))
+	var id UniqueID
+	if stNode.loadType == loadTypePartition {
+		id = stNode.partitionID
+	} else {
+		id = stNode.collectionID
 	}
+	err := stNode.tSafeReplica.setTSafe(stNode.vChannel, id, serviceTimeMsg.timeRange.timestampMax)
+	if err != nil {
+		log.Warn(err.Error())
+	}
+	//log.Debug("update tSafe:",
+	//	zap.Int64("tSafe", int64(serviceTimeMsg.timeRange.timestampMax)),
+	//	zap.Any("collectionID", stNode.collectionID),
+	//	zap.Any("id", id),
+	//	zap.Any("channel", stNode.vChannel),
+	//)
 
-	if err := stNode.sendTimeTick(serviceTimeMsg.timeRange.timestampMax); err != nil {
-		log.Error("Error: send time tick into pulsar channel failed", zap.Error(err))
-	}
+	//if err := stNode.sendTimeTick(serviceTimeMsg.timeRange.timestampMax); err != nil {
+	//	log.Warn("Error: send time tick into pulsar channel failed", zap.Error(err))
+	//}
 
-	var res Msg = &gcMsg{
-		gcRecord:  serviceTimeMsg.gcRecord,
-		timeRange: serviceTimeMsg.timeRange,
-	}
-	return []Msg{res}
+	return []Msg{}
 }
 
-func (stNode *serviceTimeNode) sendTimeTick(ts Timestamp) error {
-	msgPack := msgstream.MsgPack{}
-	timeTickMsg := msgstream.TimeTickMsg{
-		BaseMsg: msgstream.BaseMsg{
-			BeginTimestamp: ts,
-			EndTimestamp:   ts,
-			HashValues:     []uint32{0},
-		},
-		TimeTickMsg: internalpb.TimeTickMsg{
-			Base: &commonpb.MsgBase{
-				MsgType:   commonpb.MsgType_TimeTick,
-				MsgID:     0,
-				Timestamp: ts,
-				SourceID:  Params.QueryNodeID,
-			},
-		},
-	}
-	msgPack.Msgs = append(msgPack.Msgs, &timeTickMsg)
-	return stNode.timeTickMsgStream.Produce(&msgPack)
-}
+//func (stNode *serviceTimeNode) sendTimeTick(ts Timestamp) error {
+//	msgPack := msgstream.MsgPack{}
+//	timeTickMsg := msgstream.TimeTickMsg{
+//		BaseMsg: msgstream.BaseMsg{
+//			BeginTimestamp: ts,
+//			EndTimestamp:   ts,
+//			HashValues:     []uint32{0},
+//		},
+//		TimeTickMsg: internalpb.TimeTickMsg{
+//			Base: &commonpb.MsgBase{
+//				MsgType:   commonpb.MsgType_TimeTick,
+//				MsgID:     0,
+//				Timestamp: ts,
+//				SourceID:  Params.QueryNodeID,
+//			},
+//		},
+//	}
+//	msgPack.Msgs = append(msgPack.Msgs, &timeTickMsg)
+//	return stNode.timeTickMsgStream.Produce(&msgPack)
+//}
 
-func newServiceTimeNode(ctx context.Context, replica ReplicaInterface, factory msgstream.Factory, collectionID UniqueID) *serviceTimeNode {
+func newServiceTimeNode(ctx context.Context,
+	tSafeReplica TSafeReplicaInterface,
+	loadType loadType,
+	collectionID UniqueID,
+	partitionID UniqueID,
+	channel Channel,
+	factory msgstream.Factory) *serviceTimeNode {
+
 	maxQueueLength := Params.FlowGraphMaxQueueLength
 	maxParallelism := Params.FlowGraphMaxParallelism
 
@@ -104,14 +119,23 @@ func newServiceTimeNode(ctx context.Context, replica ReplicaInterface, factory m
 	baseNode.SetMaxQueueLength(maxQueueLength)
 	baseNode.SetMaxParallelism(maxParallelism)
 
-	timeTimeMsgStream, _ := factory.NewMsgStream(ctx)
-	timeTimeMsgStream.AsProducer([]string{Params.QueryTimeTickChannelName})
-	log.Debug("querynode AsProducer: " + Params.QueryTimeTickChannelName)
+	timeTimeMsgStream, err := factory.NewMsgStream(ctx)
+	if err != nil {
+		log.Warn(err.Error())
+	} else {
+		// TODO: use param table
+		timeTickChannel := "query-node-time-tick-0"
+		timeTimeMsgStream.AsProducer([]string{timeTickChannel})
+		log.Debug("query node AsProducer: " + timeTickChannel)
+	}
 
 	return &serviceTimeNode{
 		baseNode:          baseNode,
+		loadType:          loadType,
 		collectionID:      collectionID,
-		replica:           replica,
+		partitionID:       partitionID,
+		vChannel:          channel,
+		tSafeReplica:      tSafeReplica,
 		timeTickMsgStream: timeTimeMsgStream,
 	}
 }

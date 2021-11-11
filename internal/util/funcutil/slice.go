@@ -13,7 +13,8 @@ package funcutil
 
 import "reflect"
 
-func SliceContain(s interface{}, item interface{}) bool {
+// SliceContain returns true if slice s contains item.
+func SliceContain(s, item interface{}) bool {
 	ss := reflect.ValueOf(s)
 	if ss.Kind() != reflect.Slice {
 		panic("SliceContain expect a slice")
@@ -28,7 +29,8 @@ func SliceContain(s interface{}, item interface{}) bool {
 	return false
 }
 
-func SliceSetEqual(s1 interface{}, s2 interface{}) bool {
+// SliceSetEqual is used to compare two Slice
+func SliceSetEqual(s1, s2 interface{}) bool {
 	ss1 := reflect.ValueOf(s1)
 	ss2 := reflect.ValueOf(s2)
 	if ss1.Kind() != reflect.Slice {
@@ -48,7 +50,8 @@ func SliceSetEqual(s1 interface{}, s2 interface{}) bool {
 	return true
 }
 
-func SortedSliceEqual(s1 interface{}, s2 interface{}) bool {
+// SortedSliceEqual is used to compare two Sorted Slice
+func SortedSliceEqual(s1, s2 interface{}) bool {
 	ss1 := reflect.ValueOf(s1)
 	ss2 := reflect.ValueOf(s2)
 	if ss1.Kind() != reflect.Slice {

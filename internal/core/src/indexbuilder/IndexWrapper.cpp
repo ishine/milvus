@@ -21,6 +21,7 @@
 #include "indexbuilder/utils.h"
 #include "index/knowhere/knowhere/index/vector_index/ConfAdapterMgr.h"
 #include "index/knowhere/knowhere/common/Timer.h"
+#include "index/knowhere/knowhere/common/Utils.h"
 
 namespace milvus {
 namespace indexbuilder {
@@ -37,7 +38,7 @@ IndexWrapper::IndexWrapper(const char* serialized_type_params, const char* seria
     AssertInfo(!is_unsupported(index_type, metric_type), index_type + " doesn't support metric: " + metric_type);
 
     index_ = knowhere::VecIndexFactory::GetInstance().CreateVecIndex(get_index_type(), index_mode);
-    Assert(index_ != nullptr);
+    AssertInfo(index_ != nullptr, "[IndexWrapper]Index is null after create index");
 }
 
 template <typename ParamsT>  // ugly here, ParamsT will just be MapParams later
@@ -47,7 +48,7 @@ IndexWrapper::parse_impl(const std::string& serialized_params_str, knowhere::Con
 
     ParamsT params;
     deserialized_success = google::protobuf::TextFormat::ParseFromString(serialized_params_str, &params);
-    Assert(deserialized_success);
+    AssertInfo(deserialized_success, "[IndexWrapper]Deserialize params failed");
 
     for (auto i = 0; i < params.params_size(); ++i) {
         const auto& param = params.params(i);
@@ -149,7 +150,7 @@ IndexWrapper::get_config_by_name(std::string name) {
 int64_t
 IndexWrapper::dim() {
     auto dimension = get_config_by_name<int64_t>(milvus::knowhere::meta::DIM);
-    Assert(dimension.has_value());
+    AssertInfo(dimension.has_value(), "[IndexWrapper]Dimension doesn't have value");
     return (dimension.value());
 }
 
@@ -189,7 +190,8 @@ IndexWrapper::BuildWithoutIds(const knowhere::DatasetPtr& dataset) {
 
 void
 IndexWrapper::BuildWithIds(const knowhere::DatasetPtr& dataset) {
-    Assert(dataset->data().find(milvus::knowhere::meta::IDS) != dataset->data().end());
+    AssertInfo(dataset->data().find(milvus::knowhere::meta::IDS) != dataset->data().end(),
+               "[IndexWrapper]Can't find ids field in dataset");
     auto index_type = get_index_type();
     auto index_mode = get_index_mode();
     config_[knowhere::meta::ROWS] = dataset->Get<int64_t>(knowhere::meta::ROWS);
@@ -239,6 +241,10 @@ IndexWrapper::Serialize() {
         std::shared_ptr<uint8_t[]> raw_data(new uint8_t[raw_data_.size()], std::default_delete<uint8_t[]>());
         memcpy(raw_data.get(), raw_data_.data(), raw_data_.size());
         binarySet.Append(RAW_DATA, raw_data, raw_data_.size());
+        auto slice_size = get_index_file_slice_size();
+        // https://github.com/milvus-io/milvus/issues/6421
+        // Disassemble will only divide the raw vectors, other keys was already divided
+        knowhere::Disassemble(slice_size * 1024 * 1024, binarySet);
     }
 
     namespace indexcgo = milvus::proto::indexcgo;
@@ -252,7 +258,7 @@ IndexWrapper::Serialize() {
 
     std::string serialized_data;
     auto ok = ret.SerializeToString(&serialized_data);
-    Assert(ok);
+    AssertInfo(ok, "[IndexWrapper]Can't serialize data to string");
 
     auto binary = std::make_unique<IndexWrapper::Binary>();
     binary->data.resize(serialized_data.length());
@@ -268,7 +274,7 @@ IndexWrapper::Load(const char* serialized_sliced_blob_buffer, int32_t size) {
     indexcgo::BinarySet blob_buffer;
 
     auto ok = blob_buffer.ParseFromString(data);
-    Assert(ok);
+    AssertInfo(ok, "[IndexWrapper]Can't parse data from string to blob_buffer");
 
     milvus::knowhere::BinarySet binarySet;
     for (auto i = 0; i < blob_buffer.datas_size(); i++) {
@@ -315,6 +321,14 @@ IndexWrapper::get_index_mode() {
     };
     auto mode = get_config_by_name<std::string>("index_mode");
     return mode.has_value() ? mode_map[mode.value()] : knowhere::IndexMode::MODE_CPU;
+}
+
+int64_t
+IndexWrapper::get_index_file_slice_size() {
+    if (config_.contains(knowhere::INDEX_FILE_SLICE_SIZE_IN_MEGABYTE)) {
+        return config_[knowhere::INDEX_FILE_SLICE_SIZE_IN_MEGABYTE].get<int64_t>();
+    }
+    return 4;  // by default
 }
 
 std::unique_ptr<IndexWrapper::QueryResult>

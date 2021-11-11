@@ -24,7 +24,8 @@ extern "C" {
 #include "segcore/load_index_c.h"
 
 typedef void* CSegmentInterface;
-typedef void* CQueryResult;
+typedef void* CSearchResult;
+typedef void* CRetrieveResult;
 
 //////////////////////////////    common interfaces    //////////////////////////////
 CSegmentInterface
@@ -34,18 +35,17 @@ void
 DeleteSegment(CSegmentInterface c_segment);
 
 void
-DeleteQueryResult(CQueryResult query_result);
+DeleteSearchResult(CSearchResult search_result);
 
 CStatus
 Search(CSegmentInterface c_segment,
-       CPlan plan,
-       CPlaceholderGroup* placeholder_groups,
-       uint64_t* timestamps,
-       int num_groups,
-       CQueryResult* result);
+       CSearchPlan c_plan,
+       CPlaceholderGroup c_placeholder_group,
+       uint64_t timestamp,
+       CSearchResult* result);
 
-CStatus
-FillTargetEntry(CSegmentInterface c_segment, CPlan c_plan, CQueryResult result);
+CProtoResult
+Retrieve(CSegmentInterface c_segment, CRetrievePlan c_plan, uint64_t timestamp);
 
 int64_t
 GetMemoryUsageInBytes(CSegmentInterface c_segment);
@@ -85,6 +85,9 @@ CStatus
 LoadFieldData(CSegmentInterface c_segment, CLoadFieldDataInfo load_field_data_info);
 
 CStatus
+LoadDeletedRecord(CSegmentInterface c_segment, CLoadDeletedRecordInfo deleted_record_info);
+
+CStatus
 UpdateSealedSegmentIndex(CSegmentInterface c_segment, CLoadIndexInfo c_load_index_info);
 
 CStatus
@@ -92,19 +95,6 @@ DropFieldData(CSegmentInterface c_segment, int64_t field_id);
 
 CStatus
 DropSealedSegmentIndex(CSegmentInterface c_segment, int64_t field_id);
-
-//////////////////////////////    deprecated interfaces    //////////////////////////////
-CStatus
-UpdateSegmentIndex(CSegmentInterface c_segment, CLoadIndexInfo c_load_index_info);
-
-int
-Close(CSegmentInterface c_segment);
-
-int
-BuildIndex(CCollection c_collection, CSegmentInterface c_segment);
-
-bool
-IsOpened(CSegmentInterface c_segment);
 
 #ifdef __cplusplus
 }

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	etcdkv "github.com/milvus-io/milvus/internal/kv/etcd"
-	"go.etcd.io/etcd/clientv3"
 )
 
 const (
@@ -24,6 +23,7 @@ const (
 	logicalBitsMask = (1 << logicalBits) - 1
 )
 
+// ComposeTS returns a timestamp composed of physical part and logical part
 func ComposeTS(physical, logical int64) uint64 {
 	return uint64((physical << logicalBits) + logical)
 }
@@ -36,10 +36,29 @@ func ParseTS(ts uint64) (time.Time, uint64) {
 	return physicalTime, logical
 }
 
-func NewTSOKVBase(etcdAddr []string, tsoRoot, subPath string) *etcdkv.EtcdKV {
-	client, _ := clientv3.New(clientv3.Config{
-		Endpoints:   etcdAddr,
-		DialTimeout: 5 * time.Second,
-	})
-	return etcdkv.NewEtcdKV(client, path.Join(tsoRoot, subPath))
+// ParseHybridTs parses the ts to (physical, logical), physical part is of utc-timestamp format.
+func ParseHybridTs(ts uint64) (int64, int64) {
+	logical := ts & logicalBitsMask
+	physical := ts >> logicalBits
+	return int64(physical), int64(logical)
+}
+
+// Mod24H parses the ts to millisecond in one day
+func Mod24H(ts uint64) uint64 {
+	logical := ts & logicalBitsMask
+	physical := ts >> logicalBits
+	physical = physical % (uint64(24 * 60 * 60 * 1000))
+	return (physical << logicalBits) | logical
+}
+
+// AddPhysicalTimeOnTs adds physical time on ts and return ts
+func AddPhysicalTimeOnTs(timeInMs int64, ts uint64) uint64 {
+	physical, logical := ParseHybridTs(ts)
+
+	return ComposeTS(physical+timeInMs, logical)
+}
+
+// NewTSOKVBase returns a etcdkv.EtcdKV object
+func NewTSOKVBase(etcdEndpoints []string, tsoRoot, subPath string) (*etcdkv.EtcdKV, error) {
+	return etcdkv.NewEtcdKV(etcdEndpoints, path.Join(tsoRoot, subPath))
 }

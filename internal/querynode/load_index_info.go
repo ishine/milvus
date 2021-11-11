@@ -20,17 +20,17 @@ package querynode
 */
 import "C"
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"unsafe"
-
-	"errors"
 
 	"go.uber.org/zap"
 
 	"github.com/milvus-io/milvus/internal/log"
 )
 
+// LoadIndexInfo is a wrapper of the underlying C-structure C.CLoadIndexInfo
 type LoadIndexInfo struct {
 	cLoadIndexInfo C.CLoadIndexInfo
 }
@@ -68,7 +68,7 @@ func (li *LoadIndexInfo) appendIndexParam(indexKey string, indexValue string) er
 	return nil
 }
 
-func (li *LoadIndexInfo) appendFieldInfo(fieldID int64) error {
+func (li *LoadIndexInfo) appendFieldInfo(fieldID FieldID) error {
 	cFieldID := C.long(fieldID)
 	status := C.AppendFieldInfo(li.cLoadIndexInfo, cFieldID)
 	errorCode := status.error_code

@@ -27,8 +27,11 @@ class VerifyPlanNodeVisitor : public PlanNodeVisitor {
     void
     visit(BinaryVectorANNS& node) override;
 
+    void
+    visit(RetrievePlanNode& node) override;
+
  public:
-    using RetType = QueryResult;
+    using RetType = SearchResult;
     VerifyPlanNodeVisitor() = default;
 
  private:

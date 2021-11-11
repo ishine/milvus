@@ -27,7 +27,13 @@ class ProtoParser {
     //    ExprFromProto(const proto::plan::Expr& expr_proto);
 
     ExprPtr
-    ParseRangeExpr(const proto::plan::RangeExpr& expr_pb);
+    ParseUnaryRangeExpr(const proto::plan::UnaryRangeExpr& expr_pb);
+
+    ExprPtr
+    ParseBinaryRangeExpr(const proto::plan::BinaryRangeExpr& expr_pb);
+
+    ExprPtr
+    ParseCompareExpr(const proto::plan::CompareExpr& expr_pb);
 
     ExprPtr
     ParseTermExpr(const proto::plan::TermExpr& expr_pb);
@@ -44,8 +50,14 @@ class ProtoParser {
     std::unique_ptr<VectorPlanNode>
     PlanNodeFromProto(const proto::plan::PlanNode& plan_node_proto);
 
+    std::unique_ptr<RetrievePlanNode>
+    RetrievePlanNodeFromProto(const proto::plan::PlanNode& plan_node_proto);
+
     std::unique_ptr<Plan>
     CreatePlan(const proto::plan::PlanNode& plan_node_proto);
+
+    std::unique_ptr<RetrievePlan>
+    CreateRetrievePlan(const proto::plan::PlanNode& plan_node_proto);
 
  private:
     const Schema& schema;

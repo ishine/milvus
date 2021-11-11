@@ -80,6 +80,17 @@ struct Placeholder {
     }
 };
 
+struct RetrievePlan {
+ public:
+    explicit RetrievePlan(const Schema& schema) : schema_(schema) {
+    }
+
+ public:
+    const Schema& schema_;
+    std::unique_ptr<RetrievePlanNode> plan_node_;
+    std::vector<FieldOffset> field_offsets_;
+};
+
 using PlanPtr = std::unique_ptr<Plan>;
 
 struct PlaceholderGroup : std::vector<Placeholder> {

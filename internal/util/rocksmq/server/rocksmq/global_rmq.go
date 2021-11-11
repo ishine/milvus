@@ -13,29 +13,51 @@ package rocksmq
 
 import (
 	"os"
+	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/milvus-io/milvus/internal/allocator"
+	"github.com/milvus-io/milvus/internal/log"
+	"github.com/milvus-io/milvus/internal/util/paramtable"
+	"go.uber.org/zap"
 
 	rocksdbkv "github.com/milvus-io/milvus/internal/kv/rocksdb"
 )
 
+// Rmq is global rocksmq instance that will be initialized only once
 var Rmq *rocksmq
+
+// once is used to init global rocksmq
 var once sync.Once
 
+// Params provide params that rocksmq needs
+var params paramtable.BaseTable
+
+// InitRmq is deprecate implementation of global rocksmq. will be removed later
 func InitRmq(rocksdbName string, idAllocator allocator.GIDAllocator) error {
 	var err error
 	Rmq, err = NewRocksMQ(rocksdbName, idAllocator)
 	return err
 }
 
-func InitRocksMQ(rocksdbName string) error {
+// InitRocksMQ init global rocksmq single instance
+func InitRocksMQ() error {
 	var err error
 	once.Do(func() {
-		kvname := rocksdbName + "_kv"
-		if _, err := os.Stat(kvname); !os.IsNotExist(err) {
-			_ = os.RemoveAll(kvname)
+		params.Init()
+		rocksdbName, _ := params.Load("_RocksmqPath")
+		log.Debug("RocksmqPath=" + rocksdbName)
+		_, err = os.Stat(rocksdbName)
+		if os.IsNotExist(err) {
+			err = os.MkdirAll(rocksdbName, os.ModePerm)
+			if err != nil {
+				errMsg := "Create dir " + rocksdbName + " failed"
+				panic(errMsg)
+			}
 		}
+
+		kvname := rocksdbName + "_kv"
 		rocksdbKV, err := rocksdbkv.NewRocksdbKV(kvname)
 		if err != nil {
 			panic(err)
@@ -43,9 +65,35 @@ func InitRocksMQ(rocksdbName string) error {
 		idAllocator := allocator.NewGlobalIDAllocator("rmq_id", rocksdbKV)
 		_ = idAllocator.Initialize()
 
-		if _, err := os.Stat(rocksdbName); !os.IsNotExist(err) {
-			_ = os.RemoveAll(rocksdbName)
+		rawRmqPageSize, err := params.Load("rocksmq.rocksmqPageSize")
+		if err == nil && rawRmqPageSize != "" {
+			rmqPageSize, err := strconv.ParseInt(rawRmqPageSize, 10, 64)
+			if err == nil {
+				atomic.StoreInt64(&RocksmqPageSize, rmqPageSize)
+			} else {
+				log.Warn("rocksmq.rocksmqPageSize is invalid, using default value 2G")
+			}
 		}
+		rawRmqRetentionTimeInMinutes, err := params.Load("rocksmq.retentionTimeInMinutes")
+		if err == nil && rawRmqRetentionTimeInMinutes != "" {
+			rawRmqRetentionTimeInMinutes, err := strconv.ParseInt(rawRmqRetentionTimeInMinutes, 10, 64)
+			if err == nil {
+				atomic.StoreInt64(&RocksmqRetentionTimeInMinutes, rawRmqRetentionTimeInMinutes)
+			} else {
+				log.Warn("rocksmq.retentionTimeInMinutes is invalid, using default value 3 days")
+			}
+		}
+		rawRmqRetentionSizeInMB, err := params.Load("rocksmq.retentionSizeInMB")
+		if err == nil && rawRmqRetentionSizeInMB != "" {
+			rawRmqRetentionSizeInMB, err := strconv.ParseInt(rawRmqRetentionSizeInMB, 10, 64)
+			if err == nil {
+				atomic.StoreInt64(&RocksmqRetentionSizeInMB, rawRmqRetentionSizeInMB)
+			} else {
+				log.Warn("rocksmq.retentionSizeInMB is invalid, using default value 0")
+			}
+		}
+		log.Debug("", zap.Any("RocksmqRetentionTimeInMinutes", RocksmqRetentionTimeInMinutes),
+			zap.Any("RocksmqRetentionSizeInMB", RocksmqRetentionSizeInMB), zap.Any("RocksmqPageSize", RocksmqPageSize))
 		Rmq, err = NewRocksMQ(rocksdbName, idAllocator)
 		if err != nil {
 			panic(err)
@@ -54,12 +102,10 @@ func InitRocksMQ(rocksdbName string) error {
 	return err
 }
 
+// CloseRocksMQ is used to close global rocksmq
 func CloseRocksMQ() {
+	log.Debug("Close Rocksmq!")
 	if Rmq != nil && Rmq.store != nil {
-		Rmq.store.Close()
-		rocksdbName := Rmq.store.Name()
-		_ = os.RemoveAll(rocksdbName)
-		kvname := rocksdbName + "_kv"
-		os.RemoveAll(kvname)
+		Rmq.Close()
 	}
 }
